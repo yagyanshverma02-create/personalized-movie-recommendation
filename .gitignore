@@ -1,0 +1,14 @@
+venv/
+__pycache__/
+*.pyc
+.env
+.streamlit/secrets.toml
+
+*.zip
+
+data/*.csv
+data/*.json
+
+!data/links.csv
+!data/movies_clean.csv
+!data/ratings_clean.csv

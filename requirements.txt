@@ -1,0 +1,6 @@
+streamlit==1.64.0
+pandas
+numpy
+scipy
+scikit-learn
+scikit-surprise
