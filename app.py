@@ -18,7 +18,16 @@ from tmdb_helper import (
     get_movie_backdrop_image,
     get_movie_details,
     get_movie_poster_image,
+    get_discover_movies,
 )
+from intent_match import get_intent_match_details
+from watch_later import (
+    DEFAULT_WATCH_LATER_PROFILE_ID,
+    toggle_watch_later_entry,
+    watch_later_key,
+    watch_later_movie_entry,
+)
+from movie_details import select_movie_details
 
 from scipy.sparse import csr_matrix, lil_matrix
 from sklearn.neighbors import NearestNeighbors
@@ -1295,63 +1304,6 @@ def get_context_score(movie_genres, selected_genres=None, selected_mood=None):
     return float(np.mean(component_scores)) if component_scores else 0.0
 
 
-def get_intent_match_details(movie_genres, selected_genres=None, selected_mood=None, reference_similarity=None):
-    """Return a rounded, explanatory score from explicit, verifiable intent signals.
-
-    This is presentation-only. It does not feed context_score or recommendation ranking.
-    """
-    selected_genres = list(dict.fromkeys(selected_genres or []))
-    mood_genres = MOOD_GENRES.get(selected_mood, set()) if selected_mood else set()
-    actual = set()
-    if isinstance(movie_genres, str) and movie_genres.strip():
-        actual = {
-            genre.strip()
-            for genre in movie_genres.split("|")
-            if genre.strip() and genre.strip() != "(no genres listed)"
-        }
-
-    signals = []
-    explanations = []
-    if selected_genres:
-        matched = [
-            genre for genre in selected_genres
-            if ({"Romance", "Comedy"}.issubset(actual) if genre == "Rom-Com" else genre in actual)
-        ]
-        coverage = len(matched) / len(selected_genres)
-        has_reference_signal = reference_similarity is not None and pd.notna(reference_similarity)
-        genre_weight = 0.60 if selected_mood and has_reference_signal else 0.65 if selected_mood or has_reference_signal else 0.85
-        signals.append((coverage, genre_weight))
-        if coverage == 1:
-            explanations.append(f"Strong {', '.join(selected_genres)} genre match")
-        elif matched:
-            explanations.append(f"Matches {len(matched)} of {len(selected_genres)} requested genres ({', '.join(matched)})")
-        else:
-            explanations.append("No requested genre appears in its local metadata")
-
-    if selected_mood and mood_genres:
-        mood_coverage = len(actual & mood_genres) / len(mood_genres)
-        has_reference_signal = reference_similarity is not None and pd.notna(reference_similarity)
-        mood_weight = 0.18 if selected_genres and has_reference_signal else 0.20 if selected_genres else 0.65 if has_reference_signal else 0.85
-        signals.append((mood_coverage, mood_weight))
-        if mood_coverage > 0:
-            explanations.append(f"Local genre metadata supports {selected_mood}")
-
-    if reference_similarity is not None and pd.notna(reference_similarity):
-        similarity = float(np.clip(reference_similarity, 0.0, 1.0))
-        reference_weight = (
-            0.12 if selected_genres or selected_mood
-            else 0.75
-        )
-        signals.append((similarity, reference_weight))
-        if similarity > 0:
-            explanations.append("Related to your reference movie in MovieMind’s item-similarity model")
-
-    if not signals:
-        return None, None
-    score = round(100 * sum(value * weight for value, weight in signals))
-    return int(np.clip(score, 0, 100)), "; ".join(explanations) or "No verified metadata match"
-
-
 # ============================================================
 # ============================================================
 # LOCAL PROFILE STORAGE
@@ -1369,6 +1321,88 @@ def load_profiles():
 def save_profiles(profiles):
     with open(PROFILE_PATH, "w", encoding="utf-8") as profile_file:
         json.dump(profiles, profile_file, indent=2, ensure_ascii=False)
+
+
+def get_active_watch_later_entries(profiles=None):
+    profiles = load_profiles() if profiles is None else profiles
+    profile_id = st.session_state.get("profile_id")
+    if not profile_id and any(
+        profile.get("profile_id") == DEFAULT_WATCH_LATER_PROFILE_ID
+        for profile in profiles
+    ):
+        profile_id = DEFAULT_WATCH_LATER_PROFILE_ID
+    profile = next(
+        (item for item in profiles if item.get("profile_id") == profile_id),
+        None,
+    )
+    entries = (profile or {}).get("watch_later", [])
+    return list(entries) if isinstance(entries, list) else []
+
+
+def toggle_active_watch_later(movie):
+    """Persist one add/remove operation through the existing local profile file."""
+    profiles = load_profiles()
+    profile_id = st.session_state.get("profile_id")
+    if not profile_id:
+        profile_id = DEFAULT_WATCH_LATER_PROFILE_ID
+        st.session_state["profile_id"] = profile_id
+
+    profile = next(
+        (item for item in profiles if item.get("profile_id") == profile_id),
+        None,
+    )
+    if profile is None:
+        profile = {
+            "profile_id": profile_id,
+            "name": st.session_state.get("profile_name") or "My MovieMind",
+            "movies": [],
+            "watch_later": [],
+        }
+        profiles.append(profile)
+
+    watch_later, saved = toggle_watch_later_entry(
+        profile.get("watch_later", []),
+        movie,
+    )
+    profile["watch_later"] = watch_later
+    save_profiles(profiles)
+    st.session_state["profile_id"] = profile_id
+    return saved
+
+
+def watch_later_frame(entries):
+    rows = []
+    for entry in entries:
+        if entry.get("external_tmdb"):
+            tmdb_id = int(entry["tmdbId"])
+            rows.append({
+                "movieId": -tmdb_id,
+                "tmdbId": tmdb_id,
+                "imdbId": None,
+                "title": str(entry.get("title", "")),
+                "genres": str(entry.get("genres", "")),
+                "release_date": str(entry.get("release_date", "")),
+                "poster_path": entry.get("poster_path"),
+                "backdrop_path": entry.get("backdrop_path"),
+                "vote_average": entry.get("vote_average"),
+                "_external_tmdb": True,
+            })
+            continue
+        try:
+            movie_id = int(entry.get("movieId"))
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if movie_id not in movie_lookup.index:
+            continue
+        movie = movie_lookup.loc[movie_id]
+        rows.append({
+            "movieId": movie_id,
+            "tmdbId": movie.get("tmdbId"),
+            "imdbId": movie.get("imdbId"),
+            "title": str(movie.get("title", "")),
+            "genres": "" if pd.isna(movie.get("genres")) else str(movie.get("genres")),
+        })
+    return pd.DataFrame(rows)
 
 
 def profile_rows_to_pairs(profile):
@@ -1531,6 +1565,7 @@ def signal_explanation(movie, mode, context):
     return f"{explanation} Main signal: {strongest}."
 
 
+@st.cache_data(ttl=60 * 60, show_spinner=False, max_entries=32)
 def image_data_uri(image, fallback_svg=POSTER_PLACEHOLDER):
     """Create a self-contained image URI for compact, styled movie cards."""
     if image:
@@ -1542,14 +1577,43 @@ def image_data_uri(image, fallback_svg=POSTER_PLACEHOLDER):
     return f"data:{mime};base64,{base64.b64encode(raw).decode('ascii')}"
 
 
+def with_intent_match_columns(frame, genres, mood, reference_similarities=None, reference_title=None):
+    """Add presentation-only intent columns without changing any ranking fields."""
+    if frame is None or frame.empty:
+        return frame
+    frame = frame.copy()
+    reference_similarities = reference_similarities or {}
+    details = [
+        get_intent_match_details(
+            movie.get("genres", ""),
+            genres,
+            mood,
+            MOOD_GENRES,
+            reference_similarities.get(int(movie["movieId"])),
+            reference_title,
+        )
+        for _, movie in frame.iterrows()
+    ]
+    frame["intent_match"] = [item[0] for item in details]
+    frame["intent_explanation"] = [item[1] for item in details]
+    return frame
+
+
 def render_movie_card(movie, mode, context, row_key):
-    movie_id = int(movie["movieId"])
+    movie_id_value = movie.get("movieId")
+    movie_id = int(movie_id_value) if movie_id_value is not None else 0
+    is_external = bool(movie.get("_external_tmdb")) or movie_id < 0
     title, year = movie_title_year(movie["title"])
     metadata = get_movie_details(movie.get("tmdbId"))
-    poster = get_movie_poster_image((metadata or {}).get("poster_path"))
+    poster_path = (metadata or {}).get("poster_path") or movie.get("poster_path")
+    poster = get_movie_poster_image(poster_path)
     is_intent = mode == "current" and movie.get("intent_match") is not None and pd.notna(movie.get("intent_match"))
     score = (float(movie.get("intent_match")) / 100) if is_intent else float(movie.get("hybrid_score", movie.get("similarity", 0)) or 0)
     score_label = "Intent Match" if is_intent else ("Similarity" if "similarity" in movie else "Match")
+    browse_mode = mode in {"search", "discover", "watch_later"}
+    watch_entry = watch_later_movie_entry(movie)
+    watch_key = watch_later_key(watch_entry)
+    already_saved = watch_key in st.session_state.get("_watch_later_keys", set())
     genres = str(movie.get("genres", "")).replace("|", " · ")
     markup = (
         '<div class="movie-card">'
@@ -1557,19 +1621,28 @@ def render_movie_card(movie, mode, context, row_key):
         '<div class="movie-card-info">'
         f'<div class="movie-card-title">{html.escape(title)}</div>'
         f'<div class="movie-card-meta">{html.escape(year if year != "Year unavailable" else genres)}</div>'
-        f'<div class="movie-card-match">{html.escape(score_label)} · {score:.0%}</div>'
+        + ("" if browse_mode else f'<div class="movie-card-match">{html.escape(score_label)} · {score:.0%}</div>')
         + (f'<div class="movie-card-intent">{html.escape(str(movie.get("intent_explanation", "")))}</div>' if is_intent and movie.get("intent_explanation") else "")
         + '</div></div>'
     )
     st.markdown(markup, unsafe_allow_html=True)
-    details_col, similar_col = st.columns(2)
+    details_col, similar_col, later_col = st.columns(3)
     if details_col.button("Details", key=f"details_{row_key}_{movie_id}", use_container_width=True):
-        st.session_state["selected_hero_movie_id"] = movie_id
-        st.session_state["details_movie_id"] = movie_id
-    if similar_col.button("More Like", key=f"similar_{row_key}_{movie_id}", use_container_width=True):
+        select_movie_details(st.session_state, movie)
+        if not browse_mode and movie_id > 0:
+            st.session_state["selected_hero_movie_id"] = movie_id
+    if similar_col.button("More Like", key=f"similar_{row_key}_{movie_id}", use_container_width=True, disabled=is_external or movie_id <= 0):
         st.session_state["more_like_movie_id"] = movie_id
         st.session_state["more_like_results"] = get_similar_movies(movie_id)
         st.session_state["more_like_source_title"] = str(movie["title"])
+    if later_col.button(
+        "✓ Saved · Remove" if already_saved else "＋ Watch Later",
+        key=f"watch_later_{row_key}_{movie_id}",
+        use_container_width=True,
+        disabled=watch_entry is None,
+    ):
+        toggle_active_watch_later(movie)
+        st.rerun()
 
 
 def render_movie_row(title, frame, mode, context, row_key, caption=None):
@@ -1598,7 +1671,7 @@ def render_hero(movie, mode, context):
     score_title = "VIEWING INTENT" if is_intent else "MOVIEMIND MATCH"
     release_year = year if year != "Year unavailable" else "Release year unavailable"
     overview = (metadata or {}).get("overview", "").strip()
-    why = signal_explanation(movie, mode, context)
+    why = movie.get("intent_explanation") if is_intent else signal_explanation(movie, mode, context)
     hero_html = f"""
     <section class="cinema-hero" style='--hero-bg:url("{backdrop_uri}")'>
       <div class="cinema-copy">
@@ -1612,13 +1685,124 @@ def render_hero(movie, mode, context):
     </section>
     """
     st.markdown(hero_html, unsafe_allow_html=True)
-    view_col, similar_col, spacer = st.columns([1.2, 1.3, 5])
+    already_saved = watch_later_key({"movieId": movie_id}) in st.session_state.get("_watch_later_keys", set())
+    view_col, similar_col, later_col, spacer = st.columns([1.2, 1.3, 1.55, 4])
     if view_col.button("▶  View Details", type="primary", key=f"hero_details_{movie_id}"):
-        st.session_state["details_movie_id"] = movie_id
+        select_movie_details(st.session_state, movie)
     if similar_col.button("＋  More Like This", key=f"hero_similar_{movie_id}"):
         st.session_state["more_like_movie_id"] = movie_id
         st.session_state["more_like_results"] = get_similar_movies(movie_id)
         st.session_state["more_like_source_title"] = str(movie["title"])
+    if later_col.button(
+        "✓ Saved · Remove" if already_saved else "＋ Watch Later",
+        key=f"hero_watch_later_{movie_id}",
+        use_container_width=True,
+    ):
+        toggle_active_watch_later(movie)
+        st.rerun()
+
+
+TMDB_GENRE_NAMES = {
+    12: "Adventure", 14: "Fantasy", 16: "Animation", 18: "Drama",
+    27: "Horror", 28: "Action", 35: "Comedy", 36: "History",
+    37: "Western", 53: "Thriller", 80: "Crime", 99: "Documentary",
+    10402: "Music", 9648: "Mystery", 10749: "Romance", 878: "Sci-Fi",
+    10751: "Children", 10752: "War", 10770: "TV Movie",
+}
+
+
+def make_discover_frame(tmdb_movies):
+    rows = []
+    for item in tmdb_movies:
+        genre_names = [
+            TMDB_GENRE_NAMES[genre_id]
+            for genre_id in item.get("genre_ids", [])
+            if genre_id in TMDB_GENRE_NAMES
+        ]
+        rows.append({
+            "movieId": -int(item["tmdbId"]),
+            "tmdbId": int(item["tmdbId"]),
+            "imdbId": None,
+            "title": str(item.get("title", "")),
+            "genres": "|".join(genre_names),
+            "release_date": str(item.get("release_date", "")),
+            "poster_path": item.get("poster_path"),
+            "backdrop_path": item.get("backdrop_path"),
+            "vote_average": item.get("vote_average"),
+            "_external_tmdb": True,
+        })
+    return pd.DataFrame(rows)
+
+
+def render_movie_details():
+    detail = st.session_state.get("selected_movie_details")
+    if not detail:
+        return
+    tmdb_id = detail.get("tmdbId")
+    metadata = get_movie_details(tmdb_id) if tmdb_id else None
+    if not metadata:
+        metadata = {}
+    title, catalog_year = movie_title_year(detail.get("title", "Movie details"))
+    st.markdown(f"### {html.escape(title)}")
+    detail_left, detail_right = st.columns([1, 3])
+    with detail_left:
+        poster = get_movie_poster_image(metadata.get("poster_path") or detail.get("poster_path"))
+        if poster:
+            st.image(poster, use_container_width=True)
+        else:
+            st.markdown(POSTER_PLACEHOLDER, unsafe_allow_html=True)
+    with detail_right:
+        genres = str(detail.get("genres", "")).replace("|", " · ")
+        release_year = str(metadata.get("release_date") or detail.get("release_date") or catalog_year or "")[:4]
+        st.caption(" · ".join(value for value in (release_year, genres) if value))
+        backdrop_path = metadata.get("backdrop_path") or detail.get("backdrop_path")
+        if backdrop_path:
+            backdrop = get_movie_backdrop_image(backdrop_path)
+            if backdrop:
+                st.image(backdrop, use_container_width=True)
+        st.write(metadata.get("overview") or "Overview unavailable from TMDB.")
+        if tmdb_id:
+            st.markdown(f"[TMDB](https://www.themoviedb.org/movie/{int(tmdb_id)})")
+        imdb_id = detail.get("imdbId")
+        if imdb_id:
+            try:
+                imdb_id = int(imdb_id)
+                if imdb_id > 0:
+                    st.markdown(f"[IMDb](https://www.imdb.com/title/tt{imdb_id:07d}/)")
+            except (TypeError, ValueError, OverflowError):
+                pass
+        recommendation = detail.get("_recommendation")
+        if recommendation:
+            mode = st.session_state.get("recommendation_mode", "personalized")
+            context = st.session_state.get("recommendation_context", {"genres": [], "mood": None})
+            if mode == "current" and recommendation.get("intent_match") is not None and pd.notna(recommendation.get("intent_match")):
+                st.metric("Viewing Intent Match", f"{int(recommendation['intent_match'])}%")
+                if recommendation.get("intent_explanation"):
+                    st.caption(str(recommendation["intent_explanation"]))
+            elif recommendation.get("hybrid_score") is not None:
+                st.metric("MovieMind Match", f"{float(recommendation['hybrid_score']):.0%}")
+                st.markdown(f"**Why MovieMind picked this**  \n{signal_explanation(recommendation, mode, context)}")
+                if mode != "current":
+                    with st.expander("View model details"):
+                        st.write(f"Taste Match contribution: {0.30 * float(recommendation['user_score']):.1%}")
+                        st.write(f"Movie Similarity contribution: {0.30 * float(recommendation['item_score']):.1%}")
+                        st.write(f"Preference Learning contribution: {0.40 * float(recommendation['svd_score']):.1%}")
+    action_cols = st.columns([1, 1, 4])
+    movie_id = detail.get("movieId")
+    external = detail.get("_external_tmdb")
+    if action_cols[0].button("＋ More Like This", key=f"selected_more_like_{tmdb_id or movie_id}", disabled=external or not movie_id or movie_id <= 0):
+        st.session_state["more_like_movie_id"] = movie_id
+        st.session_state["more_like_results"] = get_similar_movies(movie_id)
+        st.session_state["more_like_source_title"] = detail["title"]
+    entry = watch_later_movie_entry(detail)
+    watch_key = watch_later_key(entry)
+    already_saved = watch_key in st.session_state.get("_watch_later_keys", set())
+    if entry and action_cols[1].button("✓ Saved · Remove" if already_saved else "＋ Watch Later", key=f"selected_watch_later_{watch_key}"):
+        toggle_active_watch_later(detail)
+        st.rerun()
+    if st.button("Close details", key="close_selected_movie_details"):
+        st.session_state.pop("selected_movie_details", None)
+        st.rerun()
 
 
 # ============================================================
@@ -1626,18 +1810,27 @@ def render_hero(movie, mode, context):
 # ============================================================
 
 profiles = load_profiles()
+if not st.session_state.get("profile_id") and not st.session_state.get("selected_movies"):
+    default_watch_profile = next(
+        (profile for profile in profiles if profile.get("profile_id") == DEFAULT_WATCH_LATER_PROFILE_ID),
+        None,
+    )
+    if default_watch_profile:
+        apply_profile(default_watch_profile)
 view_names = {
-    "recommendations": "Recommendations",
+    "home": "Home",
+    "search": "Search",
+    "discover": "Discover",
     "my-taste": "My Taste",
     "rating-history": "Rating History",
+    "watch-later": "Watch Later",
     "model-performance": "Model Performance",
     "about": "About MovieMind",
 }
-active_view = st.session_state.get("active_view", "Recommendations")
+active_view = st.session_state.get("active_view", "Home")
 if active_view not in view_names.values():
-    active_view = "Recommendations"
+    active_view = "Home"
     st.session_state["active_view"] = active_view
-discover_views = ["Recommendations", "My Taste", "Rating History"]
 
 st.markdown(
     '<div class="brand-bar"><div class="brand-mark">M</div><div><div class="brand-name">MovieMind</div><div class="brand-sub">Personalized Movie Discovery</div></div><div class="brand-ai"><span class="brand-ai-dot">●</span>AI-powered discovery</div></div>',
@@ -1651,9 +1844,12 @@ with st.sidebar:
     )
     st.markdown('<div class="sidebar-section-label">DISCOVER</div>', unsafe_allow_html=True)
     nav_icon = {
-        "Recommendations": "⌂",
+        "Home": "⌂",
+        "Search": "⌕",
+        "Discover": "✦",
         "My Taste": "♡",
         "Rating History": "◷",
+        "Watch Later": "＋",
         "Model Performance": "▤",
         "About MovieMind": "ⓘ",
     }
@@ -1670,9 +1866,13 @@ with st.sidebar:
             args=(view,),
         )
 
-    sidebar_nav_item("Recommendations", "nav_recommendations")
+    sidebar_nav_item("Home", "nav_home")
+    sidebar_nav_item("Search", "nav_search")
+    sidebar_nav_item("Discover", "nav_discover")
+    st.markdown('<div class="sidebar-section-label">MY MOVIEMIND</div>', unsafe_allow_html=True)
     sidebar_nav_item("My Taste", "nav_my_taste")
     sidebar_nav_item("Rating History", "nav_rating_history")
+    sidebar_nav_item("Watch Later", "nav_watch_later")
     st.markdown('<div class="sidebar-section-label">INSIGHTS</div>', unsafe_allow_html=True)
     sidebar_nav_item("Model Performance", "nav_model_performance")
     st.markdown('<div class="sidebar-section-label">ABOUT</div>', unsafe_allow_html=True)
@@ -1684,10 +1884,19 @@ with st.sidebar:
     )
     current_profile_name = (
         current_profile_record.get("name", "Personal taste")
-        if current_profile_pairs and current_profile_record
+        if current_profile_record
         else "Personal taste" if current_profile_pairs else "No active profile"
     )
-    profile_meta = f"Taste profile active · {len(current_profile_pairs)} rated movies" if current_profile_pairs else "Rate movies to personalize recommendations"
+    saved_watch_later_count = (
+        len(current_profile_record.get("watch_later", []))
+        if current_profile_record and isinstance(current_profile_record.get("watch_later"), list)
+        else 0
+    )
+    profile_meta = (
+        f"{len(current_profile_pairs)} rated · {saved_watch_later_count} saved to Watch Later"
+        if current_profile_record
+        else "Rate movies to personalize recommendations"
+    )
     st.markdown(
         f'<div class="sidebar-profile"><div class="sidebar-profile-title">PROFILE</div><div class="sidebar-profile-name">{html.escape(current_profile_name)}</div><div class="sidebar-profile-meta">{html.escape(profile_meta)}</div></div>',
         unsafe_allow_html=True,
@@ -1706,6 +1915,101 @@ with st.sidebar:
         if match:
             apply_profile(match)
             st.rerun()
+
+active_watch_later_entries = get_active_watch_later_entries(profiles)
+st.session_state["_watch_later_keys"] = {
+    watch_later_key(entry)
+    for entry in active_watch_later_entries
+    if watch_later_key(entry)
+}
+
+if active_view == "Search":
+    st.markdown("### Search the MovieMind catalog")
+    catalog_query = st.text_input(
+        "Search movies",
+        placeholder="Search by movie title",
+        key="catalog_search_query",
+    ).strip()
+    if catalog_query:
+        matches = movies.loc[
+            movies["title"].astype(str).str.contains(catalog_query, case=False, regex=False, na=False)
+        ].head(30)
+        search_rows = []
+        for _, item in matches.iterrows():
+            movie_id = int(item["movieId"])
+            movie = movie_lookup.loc[movie_id]
+            search_rows.append({
+                "movieId": movie_id,
+                "tmdbId": movie.get("tmdbId"),
+                "imdbId": movie.get("imdbId"),
+                "title": str(movie.get("title", "")),
+                "genres": "" if pd.isna(movie.get("genres")) else str(movie.get("genres")),
+            })
+        if search_rows:
+            render_movie_row("Catalog results", pd.DataFrame(search_rows), "search", {}, "catalog_search")
+        else:
+            st.info("No movies in the local catalog match that title.")
+    else:
+        st.caption("Searches MovieMind’s local movie catalog.")
+    render_movie_details()
+    if st.session_state.get("more_like_results") is not None:
+        render_movie_row(
+            f"More Like {st.session_state.get('more_like_source_title', 'this movie')}",
+            st.session_state["more_like_results"],
+            "similarity",
+            {},
+            "search_more_like",
+        )
+    st.markdown('<div class="footer-text">MovieMind | Personalized Hybrid Movie Recommendation System</div>', unsafe_allow_html=True)
+    st.stop()
+
+if active_view == "Discover":
+    st.markdown("### Discover movies")
+    discover_category = st.selectbox(
+        "Browse TMDB categories",
+        ["Trending", "Popular", "Latest", "Upcoming", "Highest Rated"],
+        key="discover_category",
+    )
+    with st.spinner(f"Loading {discover_category.lower()} movies…"):
+        discover_movies = get_discover_movies(discover_category)
+    if discover_movies:
+        render_movie_row(
+            discover_category,
+            make_discover_frame(discover_movies),
+            "discover",
+            {},
+            f"discover_{discover_category.casefold().replace(' ', '_')}",
+        )
+    else:
+        st.info("Discover movies are temporarily unavailable. Please try again later.")
+    render_movie_details()
+    st.markdown('<div class="footer-text">MovieMind | Personalized Movie Discovery</div>', unsafe_allow_html=True)
+    st.stop()
+
+if active_view == "Watch Later":
+    st.markdown("### Watch Later")
+    watch_frame = watch_later_frame(active_watch_later_entries)
+    if watch_frame.empty:
+        st.info("Your Watch Later list is empty.")
+    else:
+        render_movie_row(
+            "Saved for later",
+            watch_frame,
+            "watch_later",
+            {},
+            "watch_later",
+        )
+    render_movie_details()
+    if st.session_state.get("more_like_results") is not None:
+        render_movie_row(
+            f"More Like {st.session_state.get('more_like_source_title', 'this movie')}",
+            st.session_state["more_like_results"],
+            "similarity",
+            {},
+            "watch_later_more_like",
+        )
+    st.markdown('<div class="footer-text">MovieMind | Personalized Movie Discovery</div>', unsafe_allow_html=True)
+    st.stop()
 
 st.markdown('<div class="ai-panel"><div class="ai-kicker">Ask MovieMind AI</div><div class="ai-heading">What are you in the mood to watch?</div><div class="ai-sub">Describe the kind of movie you want. MovieMind will translate your request into its existing genre and mood inputs.</div></div>', unsafe_allow_html=True)
 with st.form("ai_intent_form", clear_on_submit=False):
@@ -1783,22 +2087,6 @@ if ai_submit:
             st.session_state["ai_request_error"] = "rate_limit" if is_gemini_rate_limit_error(exc) else "unavailable"
             error_class = "ai-error-state ai-429-state" if is_gemini_rate_limit_error(exc) else "ai-error-state"
             st.markdown(f'<div class="{error_class}">{html.escape(error_markup)}</div>', unsafe_allow_html=True)
-            diagnostic_message = f"{type(exc).__name__}: {exc}"
-            for secret_name in ("GEMINI_API_KEY", "TMDB_API_KEY"):
-                try:
-                    secret_value = st.secrets.get(secret_name)
-                except Exception:
-                    secret_value = None
-                if secret_value:
-                    diagnostic_message = diagnostic_message.replace(str(secret_value), "[REDACTED]")
-            diagnostic_message = re.sub(
-                r"(?i)(api[_ -]?key|token|secret|password|authorization)(\s*[:=]\s*|\s+)[^\s,;]+",
-                r"\1\2[REDACTED]",
-                diagnostic_message,
-            )
-            with st.expander("Temporary Gemini diagnostic"):
-                st.caption(f"Exception type: {type(exc).__name__}")
-                st.code(diagnostic_message)
 elif st.session_state.get("ai_request_succeeded") and st.session_state.get("recommendation_source") == "ai":
     summary = st.session_state.get("ai_intent_summary", {})
     intent_chips = [*summary.get("genres", [])]
@@ -1877,6 +2165,8 @@ if save_profile:
         profile_id = st.session_state.get("profile_id") or f"MM-{uuid.uuid4().hex[:6].upper()}"
         record = {"profile_id": profile_id, "name": st.session_state["profile_name"].strip(), "movies": [{"movieId": mid, "rating": rating} for mid, rating in profile_preview]}
         previous = next((p for p in profiles if p.get("profile_id") == profile_id), None)
+        if previous:
+            record["watch_later"] = list(previous.get("watch_later", []))
         record["created_at"] = previous.get("created_at", now) if previous else now
         record["updated_at"] = now
         profiles = [p for p in profiles if p.get("profile_id") != profile_id] + [record]
@@ -1921,7 +2211,7 @@ if generate or surprise or ai_context is not None:
         st.session_state["surprise_result"] = bool(surprise)
         st.session_state.pop("more_like_movie_id", None)
         st.session_state.pop("more_like_results", None)
-        st.session_state.pop("details_movie_id", None)
+        st.session_state.pop("selected_movie_details", None)
         st.session_state.pop("selected_hero_movie_id", None)
         if surprise:
             st.success("Here’s a MovieMind recommendation based on your current profile and viewing intent.")
@@ -1950,7 +2240,7 @@ taste_rows = [
 ]
 taste_df = pd.DataFrame(taste_rows)
 
-if active_view == "Recommendations":
+if active_view == "Home":
     current_mode = st.session_state.get("recommendation_mode", "personalized")
     recommendation_source = st.session_state.get("recommendation_source", "manual")
     current_context = st.session_state.get("recommendation_context", {"genres": [], "mood": None})
@@ -1966,18 +2256,14 @@ if active_view == "Recommendations":
         else {}
     )
     if not recommendations.empty and (has_context or reference_similarities):
-        recommendations = recommendations.copy()
-        intent_details = [
-            get_intent_match_details(
-                movie.get("genres", ""),
-                context_genres,
-                context_mood,
-                reference_similarities.get(int(movie["movieId"])),
-            )
-            for _, movie in recommendations.iterrows()
-        ]
-        recommendations["intent_match"] = [item[0] for item in intent_details]
-        recommendations["intent_explanation"] = [item[1] for item in intent_details]
+        reference_title = st.session_state.get("ai_intent_summary", {}).get("reference_movie")
+        recommendations = with_intent_match_columns(
+            recommendations,
+            context_genres,
+            context_mood,
+            reference_similarities,
+            reference_title,
+        )
     if recommendation_source == "ai":
         st.markdown("### MovieMind understood")
         summary = st.session_state.get("ai_intent_summary", {})
@@ -1998,7 +2284,15 @@ if active_view == "Recommendations":
             reference_id = int(st.session_state["ai_reference_movie_id"])
             reference_title = movie_lookup.loc[reference_id, "title"]
             reference_results = st.session_state.get("ai_reference_results", pd.DataFrame())
-            render_movie_row(f"Because you mentioned {reference_title}", reference_results, "similarity", current_context, "ai_reference_empty", "Neighbors from MovieMind’s existing item-similarity model.")
+            reference_results = with_intent_match_columns(
+                reference_results,
+                [],
+                None,
+                dict(zip(reference_results["movieId"].astype(int), reference_results["similarity"].astype(float)))
+                if not reference_results.empty else {},
+                str(reference_title),
+            )
+            render_movie_row(f"Because you mentioned {reference_title}", reference_results, "current", current_context, "ai_reference_empty", "Intent Match uses the existing item-CF similarity to this reference movie.")
     else:
         st.caption("MovieMind Match is a normalized recommendation score, not a probability." if current_mode != "current" else "Viewing Intent Match summarizes verified catalog signals. It is separate from recommendation ranking.")
         if current_context.get("genres") or current_context.get("mood"):
@@ -2008,55 +2302,21 @@ if active_view == "Recommendations":
         hero_movie = hero_rows.iloc[0] if not hero_rows.empty else recommendations.iloc[0]
         render_hero(hero_movie, current_mode, current_context)
 
-        details_id = st.session_state.get("details_movie_id")
-        if details_id is not None:
-            detail_rows = recommendations.loc[recommendations["movieId"].astype(int) == int(details_id)]
-            if not detail_rows.empty:
-                detail_movie = detail_rows.iloc[0]
-                detail_metadata = get_movie_details(detail_movie.get("tmdbId"))
-                detail_poster = get_movie_poster_image((detail_metadata or {}).get("poster_path"))
-                detail_backdrop = get_movie_backdrop_image((detail_metadata or {}).get("backdrop_path"))
-                detail_left, detail_right = st.columns([1, 3])
-                with detail_left:
-                    st.image(detail_poster or POSTER_PLACEHOLDER, use_container_width=True)
-                with detail_right:
-                    title, year = movie_title_year(detail_movie["title"])
-                    st.markdown(f"### {title}")
-                    st.caption(f"{year} · {str(detail_movie['genres']).replace('|', ' · ')}")
-                    if detail_backdrop:
-                        st.image(detail_backdrop, use_container_width=True)
-                    overview = (detail_metadata or {}).get("overview", "").strip()
-                    if overview:
-                        st.write(overview)
-                    if current_mode == "current" and detail_movie.get("intent_match") is not None and pd.notna(detail_movie.get("intent_match")):
-                        st.metric("Viewing Intent Match", f"{int(detail_movie['intent_match'])}%")
-                        if detail_movie.get("intent_explanation"):
-                            st.caption(str(detail_movie["intent_explanation"]))
-                    else:
-                        st.metric("MovieMind Match", f"{float(detail_movie['hybrid_score']):.0%}")
-                    st.markdown(f"**Why MovieMind picked this**  \n{signal_explanation(detail_movie, current_mode, current_context)}")
-                    if current_mode != "current":
-                        details = st.expander("View model details")
-                        with details:
-                            st.write(f"Taste Match contribution: {0.30 * float(detail_movie['user_score']):.1%}")
-                            st.write(f"Movie Similarity contribution: {0.30 * float(detail_movie['item_score']):.1%}")
-                            st.write(f"Preference Learning contribution: {0.40 * float(detail_movie['svd_score']):.1%}")
-                    detail_links = []
-                    if pd.notna(detail_movie.get("imdbId")) and int(detail_movie["imdbId"]) > 0:
-                        detail_links.append(f"[IMDb](https://www.imdb.com/title/tt{int(detail_movie['imdbId']):07d}/)")
-                    if pd.notna(detail_movie.get("tmdbId")) and int(detail_movie["tmdbId"]) > 0:
-                        detail_links.append(f"[TMDB](https://www.themoviedb.org/movie/{int(detail_movie['tmdbId'])})")
-                    if detail_links:
-                        st.markdown(" · ".join(detail_links))
-                    close_col, _ = st.columns([1, 4])
-                    if close_col.button("Close details", key=f"close_details_{int(detail_movie['movieId'])}"):
-                        st.session_state.pop("details_movie_id", None)
+        render_movie_details()
 
         if recommendation_source == "ai" and st.session_state.get("ai_reference_movie_id") is not None:
             reference_id = int(st.session_state["ai_reference_movie_id"])
             reference_title = movie_lookup.loc[reference_id, "title"]
             reference_results = st.session_state.get("ai_reference_results", pd.DataFrame())
-            render_movie_row(f"Because you mentioned {reference_title}", reference_results, "similarity", current_context, "ai_reference", "Neighbors from MovieMind’s existing item-similarity model.")
+            reference_results = with_intent_match_columns(
+                reference_results,
+                [],
+                None,
+                dict(zip(reference_results["movieId"].astype(int), reference_results["similarity"].astype(float)))
+                if not reference_results.empty else {},
+                str(reference_title),
+            )
+            render_movie_row(f"Because you mentioned {reference_title}", reference_results, "current", current_context, "ai_reference", "Intent Match uses the existing item-CF similarity to this reference movie.")
 
         if st.session_state.get("surprise_result"):
             main_title = "Your Surprise Pick"

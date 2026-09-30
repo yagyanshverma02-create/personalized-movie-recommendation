@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import date
 from io import BytesIO
 import re
 from typing import Any
@@ -57,6 +58,81 @@ def get_movie_details(tmdb_id: Any) -> dict[str, Any] | None:
     except (TypeError, ValueError, OverflowError):
         return None
     return _get_movie_details_cached(movie_id)
+
+
+@st.cache_data(ttl=15 * 60, show_spinner=False)
+def _get_discover_movies_cached(category: str, page: int) -> list[dict[str, Any]]:
+    """Fetch one page of a supported TMDB movie discovery category safely."""
+    endpoints = {
+        "Trending": ("trending/movie/week", {}),
+        "Popular": ("movie/popular", {}),
+        "Latest": (
+            "discover/movie",
+            {
+                "sort_by": "primary_release_date.desc",
+                "release_date.lte": date.today().isoformat(),
+                "include_adult": "false",
+            },
+        ),
+        "Upcoming": ("movie/upcoming", {}),
+        "Highest Rated": ("movie/top_rated", {}),
+    }
+    if category not in endpoints:
+        return []
+    try:
+        api_key = st.secrets.get("TMDB_API_KEY")
+        if not api_key:
+            return []
+        endpoint, category_params = endpoints[category]
+        response = requests.get(
+            f"{TMDB_API_BASE}/{endpoint}",
+            params={
+                "api_key": api_key,
+                "language": "en-US",
+                "page": max(1, int(page)),
+                **category_params,
+            },
+            timeout=8,
+        )
+        response.raise_for_status()
+        results = response.json().get("results", [])
+        if not isinstance(results, list):
+            return []
+        movies = []
+        for item in results:
+            if not isinstance(item, dict):
+                continue
+            try:
+                tmdb_id = int(item.get("id"))
+            except (TypeError, ValueError, OverflowError):
+                continue
+            if tmdb_id <= 0 or not item.get("title"):
+                continue
+            genre_ids = item.get("genre_ids", [])
+            if not isinstance(genre_ids, list):
+                genre_ids = []
+            movies.append({
+                "tmdbId": tmdb_id,
+                "title": str(item.get("title") or ""),
+                "overview": str(item.get("overview") or ""),
+                "poster_path": item.get("poster_path"),
+                "backdrop_path": item.get("backdrop_path"),
+                "release_date": str(item.get("release_date") or ""),
+                "genre_ids": genre_ids,
+                "vote_average": item.get("vote_average"),
+            })
+        return movies
+    except Exception:
+        return []
+
+
+def get_discover_movies(category: str, page: int = 1) -> list[dict[str, Any]]:
+    """Return cached TMDB-backed movies for one of MovieMind's supported categories."""
+    try:
+        page_number = int(page)
+    except (TypeError, ValueError, OverflowError):
+        page_number = 1
+    return _get_discover_movies_cached(str(category), max(1, page_number))
 
 
 def get_movie_poster_url(poster_path: Any, size: str = "w500") -> str | None:
