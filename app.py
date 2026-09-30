@@ -1783,6 +1783,22 @@ if ai_submit:
             st.session_state["ai_request_error"] = "rate_limit" if is_gemini_rate_limit_error(exc) else "unavailable"
             error_class = "ai-error-state ai-429-state" if is_gemini_rate_limit_error(exc) else "ai-error-state"
             st.markdown(f'<div class="{error_class}">{html.escape(error_markup)}</div>', unsafe_allow_html=True)
+            diagnostic_message = f"{type(exc).__name__}: {exc}"
+            for secret_name in ("GEMINI_API_KEY", "TMDB_API_KEY"):
+                try:
+                    secret_value = st.secrets.get(secret_name)
+                except Exception:
+                    secret_value = None
+                if secret_value:
+                    diagnostic_message = diagnostic_message.replace(str(secret_value), "[REDACTED]")
+            diagnostic_message = re.sub(
+                r"(?i)(api[_ -]?key|token|secret|password|authorization)(\s*[:=]\s*|\s+)[^\s,;]+",
+                r"\1\2[REDACTED]",
+                diagnostic_message,
+            )
+            with st.expander("Temporary Gemini diagnostic"):
+                st.caption(f"Exception type: {type(exc).__name__}")
+                st.code(diagnostic_message)
 elif st.session_state.get("ai_request_succeeded") and st.session_state.get("recommendation_source") == "ai":
     summary = st.session_state.get("ai_intent_summary", {})
     intent_chips = [*summary.get("genres", [])]
