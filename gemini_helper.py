@@ -65,7 +65,7 @@ User request:
 """
 
     interaction = client.interactions.create(
-        model="gemini-3.8-flash",
+        model="gemini-3.5-flash-lite",
         input=prompt,
         timeout=30,
         response_format={
