@@ -1,4 +1,7 @@
+import base64
 import json
+import html
+import re
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -6,6 +9,16 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import streamlit as st
+try:
+    from gemini_helper import parse_movie_intent
+except Exception:
+    parse_movie_intent = None
+from tmdb_helper import (
+    POSTER_PLACEHOLDER,
+    get_movie_backdrop_image,
+    get_movie_details,
+    get_movie_poster_image,
+)
 
 from scipy.sparse import csr_matrix, lil_matrix
 from sklearn.neighbors import NearestNeighbors
@@ -36,145 +49,75 @@ st.set_page_config(
 st.markdown(
     """
 <style>
-
-.block-container {
-    max-width: 1450px;
-    padding-top: 2rem;
-    padding-bottom: 3rem;
-}
-
-/* Main background */
-
-[data-testid="stAppViewContainer"] {
-    background-color: #0b0d10;
-}
-
-/* Sidebar */
-
-section[data-testid="stSidebar"] {
-    background-color: #101216;
-}
-
-/* Hero */
-
-.hero-box {
-    padding: 30px;
-    border-radius: 18px;
-    margin-bottom: 28px;
-    background: linear-gradient(
-        135deg,
-        rgba(185, 28, 28, 0.18),
-        rgba(17, 20, 25, 0.98)
-    );
-    border: 1px solid rgba(255,255,255,0.08);
-}
-
-.hero-title {
-    font-size: 44px;
-    font-weight: 750;
-    letter-spacing: -1.5px;
-}
-
-.hero-subtitle {
-    color: #9ca3af;
-    font-size: 16px;
-    margin-top: 5px;
-}
-
-.hero-description {
-    color: #d1d5db;
-    font-size: 14px;
-    max-width: 780px;
-    line-height: 1.7;
-    margin-top: 15px;
-}
-
-/* Section titles */
-
-.section-title {
-    font-size: 26px;
-    font-weight: 700;
-}
-
-.section-description {
-    color: #9ca3af;
-    font-size: 14px;
-    margin-bottom: 18px;
-}
-
-/* Stat cards */
-
-.stat-box {
-    padding: 18px;
-    border-radius: 14px;
-    background-color: #111419;
-    border: 1px solid rgba(255,255,255,0.07);
-}
-
-.stat-label {
-    color: #8b929e;
-    font-size: 11px;
-    text-transform: uppercase;
-    letter-spacing: 0.7px;
-}
-
-.stat-value {
-    font-size: 25px;
-    font-weight: 700;
-    margin-top: 7px;
-}
-
-/* Recommendation cards */
-
-div[data-testid="stVerticalBlockBorderWrapper"] {
-    border-radius: 15px;
-    border-color: rgba(255,255,255,0.08);
-    background-color: #111419;
-}
-
-/* Buttons */
-
-.stButton > button {
-    border-radius: 9px;
-    min-height: 42px;
-    font-weight: 600;
-}
-
-/* Tabs */
-
-button[data-baseweb="tab"] {
-    font-weight: 600;
-}
-
-/* Progress */
-
-div[data-testid="stProgress"] {
-    margin-top: 4px;
-    margin-bottom: 8px;
-}
-
-/* Metrics */
-
-div[data-testid="stMetric"] {
-    background-color: #111419;
-    border-radius: 12px;
-    padding: 12px;
-}
-
-/* Expanders */
-
-div[data-testid="stExpander"] {
-    border-radius: 10px;
-    border-color: rgba(255,255,255,0.07);
-}
-
-/* Footer */
-
-.footer-text {
-    color: #6b7280;
-    font-size: 12px;
-    text-align: center;
-}
+.block-container { max-width: 1500px; padding-top: 1.3rem; padding-bottom: 3rem; }
+[data-testid="stAppViewContainer"] { background: radial-gradient(ellipse at 76% -18%, #202a3b 0%, #0b0e13 45%, #090b0f 100%); }
+section[data-testid="stSidebar"] { width: 242px !important; min-width: 242px !important; background: linear-gradient(180deg,#111722 0%,#0b0e13 58%,#090b0f 100%); border-right: 1px solid rgba(255,255,255,.07); }
+section[data-testid="stSidebar"] [data-testid="stSidebarContent"] { padding: 1rem .85rem 1.2rem; }
+section[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p { color: #aab3c1; }
+.sidebar-brand { display:flex;align-items:center;gap:10px;color:#f6f7fa;padding:5px 4px 14px;border-bottom:1px solid #ffffff12;margin-bottom:17px; }
+.sidebar-brand-mark { width:30px;height:30px;display:grid;place-items:center;border-radius:9px;background:linear-gradient(145deg,#e0a66d,#b76575);color:#111;font-weight:900;font-size:16px; }
+.sidebar-brand-name { font-size:17px;font-weight:760;letter-spacing:-.45px;line-height:1.1; }
+.sidebar-brand-caption { color:#8994a4;font-size:9px;letter-spacing:1.15px;text-transform:uppercase;margin-top:4px; }
+.sidebar-section-label { color:#778394;font-size:9px;font-weight:800;letter-spacing:1.5px;margin:15px 8px 5px; }
+section[data-testid="stSidebar"] .stButton > button { width:100%;justify-content:flex-start;text-align:left;border:1px solid transparent;background:transparent;padding:0 10px;min-height:35px;color:#aab4c1;font-size:12px; }
+section[data-testid="stSidebar"] .stButton > button:hover { background:#ffffff0b;color:#f4f6f9;border-color:transparent; }
+section[data-testid="stSidebar"] .stButton > button[kind="primary"] { background:linear-gradient(90deg,#d6a36b1d,#d6a36b08)!important;box-shadow:inset 2px 0 #d6a36b;color:#fff!important;border:1px solid transparent!important; }
+.sidebar-profile { margin-top:17px;padding:13px 12px 10px;border:1px solid #ffffff12;border-radius:13px;background:linear-gradient(145deg,#ffffff08,#ffffff03); }
+.sidebar-profile-title { color:#7e8a9a;font-size:9px;font-weight:800;letter-spacing:1.4px;margin-bottom:8px; }
+.sidebar-profile-name { color:#f4f6f9;font-size:14px;font-weight:700; }
+.sidebar-profile-meta { color:#9aa5b4;font-size:11px;margin:3px 0 10px; }
+.brand-bar { display:flex;align-items:center;gap:11px;margin:0 0 17px;color:#f5f7fb; }
+.brand-mark { width:32px;height:32px;border-radius:10px;display:grid;place-items:center;background:linear-gradient(145deg,#dca66d,#b86479);color:#161216;font-size:16px;font-weight:900; }
+.brand-name { font-size:20px;font-weight:760;letter-spacing:-.65px;line-height:1.1; }
+.brand-sub { color:#929eaf;font-size:11px;margin-top:3px; }
+.brand-ai { margin-left:auto;color:#c9d2dc;font-size:10px;letter-spacing:.25px;padding:6px 9px;border:1px solid #ffffff17;border-radius:999px;background:#ffffff08;white-space:nowrap; }
+.brand-ai-dot { color:#84c8ad;margin-right:5px; }
+.ai-panel { padding:20px 22px 10px;border:1px solid #ffffff17;border-bottom:0;border-radius:18px 18px 0 0;background:linear-gradient(120deg,rgba(24,31,43,.96),rgba(16,20,28,.95));box-shadow:0 14px 40px #0004;margin:0; }
+.ai-kicker { color:#d9a978;text-transform:uppercase;letter-spacing:1.55px;font-size:10px;font-weight:800; }
+.ai-heading { color:#f7f8fb;font-size:24px;font-weight:720;letter-spacing:-.55px;margin:5px 0; }
+.ai-sub { color:#aeb7c4;font-size:12px;margin-bottom:2px; }
+div[data-testid="stForm"] { padding:5px 20px 4px;border:1px solid #ffffff17;border-top:0;border-bottom:0;border-radius:0;background:linear-gradient(120deg,rgba(24,31,43,.96),rgba(16,20,28,.95)); }
+div[data-testid="stForm"] input { min-height:52px!important;border:1px solid #ffffff20!important;border-radius:13px!important;background:#0e131b!important;color:#f4f6f9!important;padding:0 16px!important;font-size:14px!important;transition:border-color .16s ease,box-shadow .16s ease!important; }
+div[data-testid="stForm"] input:focus { border-color:#c9956a!important;box-shadow:0 0 0 3px #d6a36b1a!important; }
+div[data-testid="stForm"] [data-testid="stFormSubmitButton"] button { min-height:50px;border-radius:12px;background:linear-gradient(110deg,#d3a06c,#bd7182);border:0;color:#171316;font-weight:750;transition:filter .16s ease,transform .16s ease; }
+div[data-testid="stForm"] [data-testid="stFormSubmitButton"] button:hover { filter:brightness(1.08);transform:translateY(-1px); }
+.ai-examples { color:#8f9aab;font-size:10px;line-height:1.8;padding:2px 22px 13px;border:1px solid #ffffff17;border-top:0;border-radius:0 0 18px 18px;background:linear-gradient(120deg,rgba(24,31,43,.96),rgba(16,20,28,.95));margin:0 0 12px; }
+.ai-example-label { color:#c5ced8;font-weight:700;letter-spacing:.4px;margin-right:5px; }
+.ai-status { margin:8px 0 15px;padding:11px 14px;border:1px solid #ffffff14;border-radius:12px;background:#111720;color:#cbd3dd;font-size:12px; }
+.ai-status-label { display:block;color:#8190a1;font-size:9px;font-weight:800;letter-spacing:1.3px;margin-bottom:5px; }
+.ai-error-state { margin:8px 0 15px;padding:11px 14px;border:1px solid #c5756c50;border-radius:12px;background:#492b2a2e;color:#edc9c4;font-size:12px; }
+.ai-429-state { border-color:#d4a15e55;background:#57402438;color:#f2d7b3; }
+.manual-refine-label { color:#909bac;font-size:9px;font-weight:800;letter-spacing:1.4px;text-transform:uppercase; }
+.sidebar-profile div[data-testid="stSelectbox"] label { display:none; }
+.cinema-hero { min-height:350px;position:relative;overflow:hidden;border-radius:24px;margin:4px 0 28px;padding:40px 42px;display:flex;align-items:flex-end;background:linear-gradient(90deg,rgba(5,7,11,.97) 0%,rgba(5,7,11,.82) 39%,rgba(5,7,11,.16) 100%),linear-gradient(0deg,rgba(5,7,11,.82),transparent 65%),var(--hero-bg,linear-gradient(125deg,#18283d,#20152a 56%,#0e121a));background-position:center;background-size:cover;border:1px solid #ffffff18;box-shadow:0 22px 65px #0007; }
+.cinema-copy { max-width:650px;position:relative;z-index:1; }
+.cinema-kicker { font-size:11px;text-transform:uppercase;letter-spacing:1.5px;font-weight:800;color:#ffbd79; }
+.cinema-title { color:#fff;font-size:clamp(32px,4.2vw,56px);line-height:1.02;letter-spacing:-1.8px;font-weight:820;margin:10px 0; }
+.cinema-meta { color:#e5e8ed;font-size:13px;font-weight:650;margin:10px 0; }
+.cinema-overview { color:#d2d6df;font-size:14px;line-height:1.55;max-width:580px; }
+.cinema-why { color:#f0c7a1;font-size:13px;margin-top:13px; }
+.match-pill { display:inline-block;padding:7px 11px;border-radius:999px;background:#ffffff1c;border:1px solid #ffffff2b;color:#fff;font-size:13px;font-weight:750;backdrop-filter:blur(8px); }
+.movie-card { background:linear-gradient(160deg,#171c25,#101319);border:1px solid #ffffff0e;border-radius:13px;overflow:hidden;transition:transform .18s ease,border-color .18s ease,box-shadow .18s ease;margin-bottom:8px; }
+.movie-card:hover { transform:translateY(-4px);border-color:#eab5738c;box-shadow:0 13px 28px #0008; }
+.movie-poster { width:100%;aspect-ratio:2/3;object-fit:cover;display:block;background:#171b22; }
+.movie-card-info { padding:10px 11px 11px; }
+.movie-card-title { color:#f3f5f8;font-size:14px;font-weight:730;line-height:1.25;min-height:35px; }
+.movie-card-meta { color:#9ca6b5;font-size:11px;margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis; }
+.movie-card-match { color:#ffc27e;font-size:12px;font-weight:750;margin-top:8px; }
+.movie-card-intent { color:#aeb9c9;font-size:10px;line-height:1.35;margin-top:4px; }
+.row-heading { color:#f4f5f8;font-size:21px;font-weight:760;letter-spacing:-.35px;margin:28px 0 2px; }
+.row-caption { color:#8994a4;font-size:12px;margin-bottom:10px; }
+.intent-chip { display:inline-block;background:#ffffff10;border:1px solid #ffffff18;color:#dce2eb;border-radius:999px;padding:5px 10px;margin:3px 5px 3px 0;font-size:11px; }
+.section-gap {height:10px;}
+.stButton > button { border-radius:10px;min-height:38px;font-weight:650;border-color:#ffffff1c;background:#161b24;color:#e9edf3;transition:all .16s ease; }
+.stButton > button:hover { border-color:#e4ac6d;background:#222733;color:#fff; }
+.stButton > button[kind="primary"] { background:linear-gradient(110deg,#d94b63,#9b4e9b);border:0;color:white; }
+button[data-baseweb="tab"] { font-weight:650;color:#aab3c0; }
+button[data-baseweb="tab"][aria-selected="true"] { color:#fff; }
+div[data-testid="stExpander"] { border-radius:13px;border-color:#ffffff15;background:#10141b; }
+div[data-testid="stMetric"] { background:#121720;border-radius:12px;padding:10px; }
+.footer-text { color:#687385;font-size:12px;text-align:center;margin-top:22px; }
+@media (max-width: 760px) { .block-container{padding-top:1rem}.cinema-hero{min-height:300px;padding:25px 22px}.ai-panel{padding:17px 16px 8px}.ai-heading{font-size:21px}.ai-examples{padding-left:16px;padding-right:16px}.brand-sub{display:none}.row-heading{font-size:18px}section[data-testid="stSidebar"]{width:min(250px,82vw)!important;min-width:min(250px,82vw)!important} }
 
 </style>
 """,
@@ -248,12 +191,11 @@ def create_movie_options(movies):
             row["title"]
         )
 
+        display_title = title
         if title_counts[title] > 1:
-            label = (
-                f"{title} | Movie ID {movie_id}"
-            )
+            label = f"{display_title} | Movie ID {movie_id}"
         else:
-            label = title
+            label = display_title
 
         movie_label_to_id[
             label
@@ -265,6 +207,41 @@ def create_movie_options(movies):
 movie_label_to_id = (
     create_movie_options(movies)
 )
+
+
+def movie_title_year(title):
+    """Return a local dataset title and its year, when present."""
+    title = str(title)
+    match = re.search(r"\((\d{4})\)\s*$", title)
+    return (title[:match.start()].strip(), match.group(1)) if match else (title, "Year unavailable")
+
+
+def get_similar_movies(movie_id, limit=8):
+    """Use the fitted item-CF model to return cosine-nearest local movies."""
+    movie_id = int(movie_id)
+    if movie_id not in movie_to_index:
+        return pd.DataFrame()
+    movie_index = movie_to_index[movie_id]
+    neighbor_count = min(21, normalized_item_matrix.shape[0])
+    distances, indices = item_model.kneighbors(
+        normalized_item_matrix[movie_index], n_neighbors=neighbor_count
+    )
+    rows = []
+    for distance, neighbor_index in zip(distances[0], indices[0]):
+        similar_id = index_to_movie[int(neighbor_index)]
+        similarity = float(1.0 - distance)
+        if similar_id == movie_id or similarity <= 0 or similar_id not in movie_lookup.index:
+            continue
+        movie = movie_lookup.loc[similar_id]
+        rows.append({
+            "movieId": int(similar_id), "title": str(movie["title"]),
+            "genres": "" if pd.isna(movie["genres"]) else str(movie["genres"]),
+            "imdbId": movie.get("imdbId"), "tmdbId": movie.get("tmdbId"),
+            "similarity": similarity,
+        })
+        if len(rows) >= limit:
+            break
+    return pd.DataFrame(rows)
 
 
 # ============================================================
@@ -1318,6 +1295,63 @@ def get_context_score(movie_genres, selected_genres=None, selected_mood=None):
     return float(np.mean(component_scores)) if component_scores else 0.0
 
 
+def get_intent_match_details(movie_genres, selected_genres=None, selected_mood=None, reference_similarity=None):
+    """Return a rounded, explanatory score from explicit, verifiable intent signals.
+
+    This is presentation-only. It does not feed context_score or recommendation ranking.
+    """
+    selected_genres = list(dict.fromkeys(selected_genres or []))
+    mood_genres = MOOD_GENRES.get(selected_mood, set()) if selected_mood else set()
+    actual = set()
+    if isinstance(movie_genres, str) and movie_genres.strip():
+        actual = {
+            genre.strip()
+            for genre in movie_genres.split("|")
+            if genre.strip() and genre.strip() != "(no genres listed)"
+        }
+
+    signals = []
+    explanations = []
+    if selected_genres:
+        matched = [
+            genre for genre in selected_genres
+            if ({"Romance", "Comedy"}.issubset(actual) if genre == "Rom-Com" else genre in actual)
+        ]
+        coverage = len(matched) / len(selected_genres)
+        has_reference_signal = reference_similarity is not None and pd.notna(reference_similarity)
+        genre_weight = 0.60 if selected_mood and has_reference_signal else 0.65 if selected_mood or has_reference_signal else 0.85
+        signals.append((coverage, genre_weight))
+        if coverage == 1:
+            explanations.append(f"Strong {', '.join(selected_genres)} genre match")
+        elif matched:
+            explanations.append(f"Matches {len(matched)} of {len(selected_genres)} requested genres ({', '.join(matched)})")
+        else:
+            explanations.append("No requested genre appears in its local metadata")
+
+    if selected_mood and mood_genres:
+        mood_coverage = len(actual & mood_genres) / len(mood_genres)
+        has_reference_signal = reference_similarity is not None and pd.notna(reference_similarity)
+        mood_weight = 0.18 if selected_genres and has_reference_signal else 0.20 if selected_genres else 0.65 if has_reference_signal else 0.85
+        signals.append((mood_coverage, mood_weight))
+        if mood_coverage > 0:
+            explanations.append(f"Local genre metadata supports {selected_mood}")
+
+    if reference_similarity is not None and pd.notna(reference_similarity):
+        similarity = float(np.clip(reference_similarity, 0.0, 1.0))
+        reference_weight = (
+            0.12 if selected_genres or selected_mood
+            else 0.75
+        )
+        signals.append((similarity, reference_weight))
+        if similarity > 0:
+            explanations.append("Related to your reference movie in MovieMind’s item-similarity model")
+
+    if not signals:
+        return None, None
+    score = round(100 * sum(value * weight for value, weight in signals))
+    return int(np.clip(score, 0, 100)), "; ".join(explanations) or "No verified metadata match"
+
+
 # ============================================================
 # ============================================================
 # LOCAL PROFILE STORAGE
@@ -1368,6 +1402,223 @@ def reset_profile_state():
     st.session_state.pop("profile_id", None)
     st.session_state.pop("profile", None)
     st.session_state.pop("recommendations", None)
+    clear_ai_request_state()
+
+
+def clear_ai_request_state(clear_recommendations=False):
+    """Remove only submitted AI state; manual genre and mood widgets remain untouched."""
+    for key in (
+        "ai_intent_summary",
+        "ai_reference_movie_id",
+        "ai_reference_results",
+        "ai_reference_missing",
+        "ai_request_succeeded",
+        "ai_request_error",
+    ):
+        st.session_state.pop(key, None)
+    if st.session_state.get("recommendation_source") == "ai":
+        st.session_state["recommendation_source"] = "manual"
+        clear_recommendations = True
+    if clear_recommendations:
+        st.session_state["recommendations"] = pd.DataFrame()
+        st.session_state["surprise_result"] = False
+
+
+def clear_ai_state_for_manual_context():
+    """Keep AI summaries from being presented as the current manual request."""
+    clear_ai_request_state(clear_recommendations=True)
+
+
+def set_active_view(view):
+    st.session_state["active_view"] = view
+
+
+def is_gemini_rate_limit_error(error):
+    """Recognize SDK and HTTP 429 errors without exposing the exception text."""
+    response = getattr(error, "response", None)
+    return (
+        getattr(error, "code", None) == 429
+        or getattr(error, "status_code", None) == 429
+        or getattr(response, "status_code", None) == 429
+        or "429" in str(error)
+        or "rate limit" in str(error).casefold()
+    )
+
+
+def normalize_ai_genres(genres):
+    """Map Gemini's genre labels onto values understood by local MovieMind context."""
+    aliases = {
+        "science fiction": "Sci-Fi", "sci fi": "Sci-Fi", "sci-fi": "Sci-Fi",
+        "family": "Children", "children's": "Children", "film noir": "Film-Noir",
+        "rom com": "Rom-Com", "rom-com": "Rom-Com",
+    }
+    by_casefold = {genre.casefold(): genre for genre in DATASET_GENRES}
+    normalized = []
+    for value in genres or []:
+        candidate = str(value).strip()
+        if not candidate:
+            continue
+        canonical = aliases.get(candidate.casefold(), by_casefold.get(candidate.casefold(), candidate))
+        if canonical == "Rom-Com" and "Rom-Com" not in GENRE_OPTIONS:
+            canonical = "Comedy"
+        if canonical in DATASET_GENRES and canonical not in normalized:
+            normalized.append(canonical)
+    return normalized
+
+
+def normalize_ai_mood(mood):
+    """Map supported intent words to the existing mood-to-genre mapping."""
+    if not mood:
+        return None
+    key = re.sub(r"[^a-z]+", " ", str(mood).casefold()).strip()
+    aliases = {
+        "funny": "Funny", "humorous": "Funny", "comedic": "Funny",
+        "romantic": "Romantic", "love": "Romantic",
+        "feel good": "Feel-Good", "uplifting": "Feel-Good",
+        "emotional": "Emotional", "moving": "Emotional",
+        "relaxing": "Relaxing", "calm": "Relaxing", "cozy": "Relaxing",
+        "exciting": "Exciting", "adventurous": "Exciting",
+        "dark": "Dark", "suspenseful": "Suspenseful", "tense": "Suspenseful",
+    }
+    return aliases.get(key)
+
+
+def find_local_movie_id(title):
+    """Resolve a reference title against the local catalog without external search."""
+    if not title:
+        return None
+
+    def normalize_title(value):
+        value = re.sub(r"\s*\(\d{4}\)\s*$", "", str(value))
+        return re.sub(r"[^a-z0-9]+", "", value.casefold())
+
+    requested = normalize_title(title)
+    if not requested:
+        return None
+    matches = movies.loc[movies["title"].map(normalize_title) == requested, "movieId"]
+    return int(matches.iloc[0]) if not matches.empty else None
+
+
+def signal_explanation(movie, mode, context):
+    """Build a restrained explanation from the recommendation's stored signals."""
+    if mode == "current":
+        labels = list(context.get("genres", []))
+        mood = context.get("mood")
+        intent = " + ".join(labels) if labels else "your selected mood"
+        if mood:
+            intent = f"{intent} + {mood}" if labels else mood
+        return f"Its local genre metadata aligns with your current {intent} viewing intent."
+
+    weighted = {
+        "Taste Match": .30 * float(movie.get("user_score", 0) or 0),
+        "Movie Similarity": .30 * float(movie.get("item_score", 0) or 0),
+        "Preference Learning": .40 * float(movie.get("svd_score", 0) or 0),
+    }
+    strongest = max(weighted, key=weighted.get)
+    explanations = {
+        "Taste Match": "User-based collaborative filtering found rating patterns similar to your profile.",
+        "Movie Similarity": "Item-based collaborative filtering found similarity to movies in your profile.",
+        "Preference Learning": "Preference Learning found a strong signal from the ratings in your profile.",
+    }
+    explanation = explanations[strongest]
+    if mode == "combined" and bool(movie.get("context_applied", False)) and float(movie.get("context_score", 0) or 0) > 0:
+        labels = list(context.get("genres", []))
+        mood = context.get("mood")
+        intent = " + ".join(labels) if labels else "your selected mood"
+        if mood:
+            intent = f"{intent} + {mood}" if labels else mood
+        explanation = f"Its genre metadata aligns with your current {intent} viewing intent; {explanation[0].lower() + explanation[1:]}"
+    return f"{explanation} Main signal: {strongest}."
+
+
+def image_data_uri(image, fallback_svg=POSTER_PLACEHOLDER):
+    """Create a self-contained image URI for compact, styled movie cards."""
+    if image:
+        raw = image if isinstance(image, bytes) else str(image).encode("utf-8")
+        mime = "image/jpeg" if isinstance(image, bytes) else "image/svg+xml"
+    else:
+        raw = fallback_svg.encode("utf-8")
+        mime = "image/svg+xml"
+    return f"data:{mime};base64,{base64.b64encode(raw).decode('ascii')}"
+
+
+def render_movie_card(movie, mode, context, row_key):
+    movie_id = int(movie["movieId"])
+    title, year = movie_title_year(movie["title"])
+    metadata = get_movie_details(movie.get("tmdbId"))
+    poster = get_movie_poster_image((metadata or {}).get("poster_path"))
+    is_intent = mode == "current" and movie.get("intent_match") is not None and pd.notna(movie.get("intent_match"))
+    score = (float(movie.get("intent_match")) / 100) if is_intent else float(movie.get("hybrid_score", movie.get("similarity", 0)) or 0)
+    score_label = "Intent Match" if is_intent else ("Similarity" if "similarity" in movie else "Match")
+    genres = str(movie.get("genres", "")).replace("|", " · ")
+    markup = (
+        '<div class="movie-card">'
+        f'<img class="movie-poster" src="{image_data_uri(poster)}" alt="Movie poster">'
+        '<div class="movie-card-info">'
+        f'<div class="movie-card-title">{html.escape(title)}</div>'
+        f'<div class="movie-card-meta">{html.escape(year if year != "Year unavailable" else genres)}</div>'
+        f'<div class="movie-card-match">{html.escape(score_label)} · {score:.0%}</div>'
+        + (f'<div class="movie-card-intent">{html.escape(str(movie.get("intent_explanation", "")))}</div>' if is_intent and movie.get("intent_explanation") else "")
+        + '</div></div>'
+    )
+    st.markdown(markup, unsafe_allow_html=True)
+    details_col, similar_col = st.columns(2)
+    if details_col.button("Details", key=f"details_{row_key}_{movie_id}", use_container_width=True):
+        st.session_state["selected_hero_movie_id"] = movie_id
+        st.session_state["details_movie_id"] = movie_id
+    if similar_col.button("More Like", key=f"similar_{row_key}_{movie_id}", use_container_width=True):
+        st.session_state["more_like_movie_id"] = movie_id
+        st.session_state["more_like_results"] = get_similar_movies(movie_id)
+        st.session_state["more_like_source_title"] = str(movie["title"])
+
+
+def render_movie_row(title, frame, mode, context, row_key, caption=None):
+    if frame is None or frame.empty:
+        return
+    st.markdown(f'<div class="row-heading">{html.escape(title)}</div>', unsafe_allow_html=True)
+    if caption:
+        st.markdown(f'<div class="row-caption">{html.escape(caption)}</div>', unsafe_allow_html=True)
+    rows = [row for _, row in frame.iterrows()]
+    for start in range(0, len(rows), 5):
+        columns = st.columns(5)
+        for column, movie in zip(columns, rows[start:start + 5]):
+            with column:
+                render_movie_card(movie, mode, context, row_key)
+
+
+def render_hero(movie, mode, context):
+    movie_id = int(movie["movieId"])
+    metadata = get_movie_details(movie.get("tmdbId"))
+    backdrop = get_movie_backdrop_image((metadata or {}).get("backdrop_path"))
+    backdrop_uri = image_data_uri(backdrop) if backdrop else "linear-gradient(125deg,#19283b,#21172b 58%,#11151d)"
+    title, year = movie_title_year(movie["title"])
+    genres = str(movie.get("genres", "")).replace("|", " · ")
+    is_intent = mode == "current" and movie.get("intent_match") is not None and pd.notna(movie.get("intent_match"))
+    score = (float(movie.get("intent_match")) / 100) if is_intent else float(movie.get("hybrid_score", 0) or 0)
+    score_title = "VIEWING INTENT" if is_intent else "MOVIEMIND MATCH"
+    release_year = year if year != "Year unavailable" else "Release year unavailable"
+    overview = (metadata or {}).get("overview", "").strip()
+    why = signal_explanation(movie, mode, context)
+    hero_html = f"""
+    <section class="cinema-hero" style='--hero-bg:url("{backdrop_uri}")'>
+      <div class="cinema-copy">
+        <div class="cinema-kicker">{score_title} · FEATURED PICK</div>
+        <div style="margin:10px 0"><span class="match-pill">{score:.0%} {"Intent Match" if is_intent else "Match"}</span></div>
+        <div class="cinema-title">{html.escape(title)}</div>
+        <div class="cinema-meta">{html.escape(release_year)} &nbsp;·&nbsp; {html.escape(genres)}</div>
+        <div class="cinema-overview">{html.escape(overview) if overview else "Overview unavailable from TMDB."}</div>
+        <div class="cinema-why"><b>Why MovieMind picked this</b><br>{html.escape(why)}</div>
+      </div>
+    </section>
+    """
+    st.markdown(hero_html, unsafe_allow_html=True)
+    view_col, similar_col, spacer = st.columns([1.2, 1.3, 5])
+    if view_col.button("▶  View Details", type="primary", key=f"hero_details_{movie_id}"):
+        st.session_state["details_movie_id"] = movie_id
+    if similar_col.button("＋  More Like This", key=f"hero_similar_{movie_id}"):
+        st.session_state["more_like_movie_id"] = movie_id
+        st.session_state["more_like_results"] = get_similar_movies(movie_id)
+        st.session_state["more_like_source_title"] = str(movie["title"])
 
 
 # ============================================================
@@ -1375,75 +1626,215 @@ def reset_profile_state():
 # ============================================================
 
 profiles = load_profiles()
-st.markdown("""<div class="hero-box"><div class="hero-title">MovieMind</div>
-<div class="hero-subtitle">Personalized Hybrid Movie Recommendation System</div>
-<div class="hero-description">Recommend by what you want to watch, personalize using your taste, or combine current intent with your long-term preferences.</div></div>""", unsafe_allow_html=True)
+view_names = {
+    "recommendations": "Recommendations",
+    "my-taste": "My Taste",
+    "rating-history": "Rating History",
+    "model-performance": "Model Performance",
+    "about": "About MovieMind",
+}
+active_view = st.session_state.get("active_view", "Recommendations")
+if active_view not in view_names.values():
+    active_view = "Recommendations"
+    st.session_state["active_view"] = active_view
+discover_views = ["Recommendations", "My Taste", "Rating History"]
+
+st.markdown(
+    '<div class="brand-bar"><div class="brand-mark">M</div><div><div class="brand-name">MovieMind</div><div class="brand-sub">Personalized Movie Discovery</div></div><div class="brand-ai"><span class="brand-ai-dot">●</span>AI-powered discovery</div></div>',
+    unsafe_allow_html=True,
+)
 
 with st.sidebar:
-    st.markdown("## MovieMind")
-    st.caption("Personalized recommendation engine")
-    st.divider()
-    st.markdown("**Recommendation Signals**")
-    st.write("Taste Match — 30%")
-    st.write("Movie Similarity — 30%")
-    st.write("Preference Learning — 40%")
-    st.divider()
-    st.markdown("**Dataset**")
-    st.write(f"{len(user_ids):,} users")
-    st.write(f"{len(movies):,} movies")
-    st.write(f"{len(ratings):,} ratings")
-    st.divider()
-    st.caption("Saved profiles are stored locally on this computer.")
-    st.markdown("**Saved profiles**")
-    st.caption(f"{len(profiles)} profile(s) saved locally.")
+    st.markdown(
+        '<div class="sidebar-brand"><div class="sidebar-brand-mark">M</div><div><div class="sidebar-brand-name">MovieMind</div><div class="sidebar-brand-caption">AI movie discovery</div></div></div>',
+        unsafe_allow_html=True,
+    )
+    st.markdown('<div class="sidebar-section-label">DISCOVER</div>', unsafe_allow_html=True)
+    nav_icon = {
+        "Recommendations": "⌂",
+        "My Taste": "♡",
+        "Rating History": "◷",
+        "Model Performance": "▤",
+        "About MovieMind": "ⓘ",
+    }
+
+    def sidebar_nav_item(view, key):
+        marker = "▏" if active_view == view else " "
+        button_type = "primary" if active_view == view else "secondary"
+        st.button(
+            f"{marker}  {nav_icon[view]}   {view}",
+            key=key,
+            type=button_type,
+            use_container_width=True,
+            on_click=set_active_view,
+            args=(view,),
+        )
+
+    sidebar_nav_item("Recommendations", "nav_recommendations")
+    sidebar_nav_item("My Taste", "nav_my_taste")
+    sidebar_nav_item("Rating History", "nav_rating_history")
+    st.markdown('<div class="sidebar-section-label">INSIGHTS</div>', unsafe_allow_html=True)
+    sidebar_nav_item("Model Performance", "nav_model_performance")
+    st.markdown('<div class="sidebar-section-label">ABOUT</div>', unsafe_allow_html=True)
+    sidebar_nav_item("About MovieMind", "nav_about")
+    current_profile_pairs = st.session_state.get("profile", [])
+    current_profile_record = next(
+        (profile for profile in profiles if profile.get("profile_id") == st.session_state.get("profile_id")),
+        None,
+    )
+    current_profile_name = (
+        current_profile_record.get("name", "Personal taste")
+        if current_profile_pairs and current_profile_record
+        else "Personal taste" if current_profile_pairs else "No active profile"
+    )
+    profile_meta = f"Taste profile active · {len(current_profile_pairs)} rated movies" if current_profile_pairs else "Rate movies to personalize recommendations"
+    st.markdown(
+        f'<div class="sidebar-profile"><div class="sidebar-profile-title">PROFILE</div><div class="sidebar-profile-name">{html.escape(current_profile_name)}</div><div class="sidebar-profile-meta">{html.escape(profile_meta)}</div></div>',
+        unsafe_allow_html=True,
+    )
+    st.caption(f"{len(profiles)} saved profile(s) on this computer")
     profile_labels = {p.get("profile_id"): p.get("name", "Unnamed") for p in profiles if p.get("profile_id")}
-    chosen_profile_id = st.selectbox("Load a profile", [""] + list(profile_labels), format_func=lambda value: "Choose a saved profile" if not value else profile_labels.get(value, value), label_visibility="collapsed")
-    if st.button("Load Profile", disabled=not chosen_profile_id, use_container_width=True):
+    chosen_profile_id = st.selectbox(
+        "Switch Profile",
+        [""] + list(profile_labels),
+        format_func=lambda value: "Switch profile…" if not value else profile_labels.get(value, value),
+        label_visibility="collapsed",
+        key="sidebar_profile_selector",
+    )
+    if st.button("Switch Profile", disabled=not chosen_profile_id, use_container_width=True):
         match = next((p for p in profiles if p.get("profile_id") == chosen_profile_id), None)
         if match:
             apply_profile(match)
             st.rerun()
 
-st.markdown("## Recommend by what I want to watch")
-st.caption("Choose a genre and/or current mood to get recommendations without rating any movies. When a valid taste profile is also provided, MovieMind combines both preferences.")
-context_genre_col, context_mood_col = st.columns(2)
-with context_genre_col:
-    selected_genres = st.multiselect(
-        "Genre Preference",
-        options=GENRE_OPTIONS,
-        placeholder="Any",
-        key="context_genres"
+st.markdown('<div class="ai-panel"><div class="ai-kicker">Ask MovieMind AI</div><div class="ai-heading">What are you in the mood to watch?</div><div class="ai-sub">Describe the kind of movie you want. MovieMind will translate your request into its existing genre and mood inputs.</div></div>', unsafe_allow_html=True)
+with st.form("ai_intent_form", clear_on_submit=False):
+    ai_prompt_col, ai_submit_col = st.columns([5, 1])
+    with ai_prompt_col:
+        ai_prompt = st.text_input("What do you want to watch?", placeholder="Try: An interesting thriller movie", label_visibility="collapsed", key="ai_prompt")
+    with ai_submit_col:
+        ai_submit = st.form_submit_button("✨ Find Movies", type="primary", use_container_width=True)
+st.markdown('<div class="ai-examples"><span class="ai-example-label">TRY</span> “Something funny for tonight” &nbsp;·&nbsp; “Like Inception but more action” &nbsp;·&nbsp; “A dark psychological thriller” &nbsp;·&nbsp; “Feel-good movies for the weekend”</div>', unsafe_allow_html=True)
+
+ai_context = None
+if ai_submit:
+    clear_ai_request_state(clear_recommendations=True)
+    st.session_state["recommendation_source"] = "manual"
+    st.session_state["ai_request_succeeded"] = False
+    if not ai_prompt.strip():
+        st.markdown('<div class="ai-error-state">Enter a movie request to ask MovieMind AI.</div>', unsafe_allow_html=True)
+    elif parse_movie_intent is None:
+        st.session_state["ai_request_error"] = "unavailable"
+        st.markdown('<div class="ai-error-state">MovieMind AI is temporarily unavailable. You can continue using manual preferences below.</div>', unsafe_allow_html=True)
+    else:
+        try:
+            with st.spinner("Understanding your movie request…"):
+                parsed_intent = parse_movie_intent(ai_prompt.strip())
+            raw_genres = list(parsed_intent.genres or [])
+            mapped_genres = normalize_ai_genres(raw_genres)
+            mapped_mood = normalize_ai_mood(parsed_intent.mood)
+            unsupported_genres = [genre for genre in raw_genres if not normalize_ai_genres([genre])]
+            reference_movie = (parsed_intent.reference_movie or "").strip() or None
+            reference_id = find_local_movie_id(reference_movie)
+            ai_context = {"genres": mapped_genres, "mood": mapped_mood}
+            summary = {
+                **ai_context,
+                "reference_movie": reference_movie,
+                "keywords": [str(word) for word in (parsed_intent.keywords or []) if str(word).strip()],
+                "unsupported_genres": unsupported_genres,
+                "unsupported_mood": bool(parsed_intent.mood and not mapped_mood),
+            }
+            st.session_state["ai_intent_summary"] = summary
+            st.session_state["ai_request_succeeded"] = True
+            if reference_id is not None:
+                st.session_state["ai_reference_movie_id"] = reference_id
+                st.session_state["ai_reference_results"] = get_similar_movies(reference_id)
+                st.session_state["ai_reference_missing"] = False
+            else:
+                st.session_state.pop("ai_reference_movie_id", None)
+                st.session_state.pop("ai_reference_results", None)
+                st.session_state["ai_reference_missing"] = bool(reference_movie)
+            intent_chips = [*mapped_genres]
+            if mapped_mood:
+                intent_chips.append(mapped_mood)
+            intent_chips.extend(summary["keywords"])
+            if reference_movie:
+                intent_chips.append(f"Reference: {reference_movie}")
+            status_markup = "".join(
+                f'<span class="intent-chip">{html.escape(str(chip))}</span>'
+                for chip in intent_chips
+            ) or '<span class="intent-chip">No supported genre or mood signal</span>'
+            st.markdown(
+                f'<div class="ai-status"><span class="ai-status-label">MOVIEMIND UNDERSTANDS</span>{status_markup}</div>',
+                unsafe_allow_html=True,
+            )
+            if summary["unsupported_genres"] or summary["unsupported_mood"]:
+                st.caption("Some intent terms were not available in MovieMind’s context and were skipped.")
+        except Exception as exc:
+            ai_context = None
+            clear_ai_request_state(clear_recommendations=True)
+            st.session_state["recommendation_source"] = "manual"
+            st.session_state["ai_request_succeeded"] = False
+            error_markup = (
+                "MovieMind AI has temporarily reached its API request limit. You can continue using manual preferences below."
+                if is_gemini_rate_limit_error(exc)
+                else "MovieMind AI is temporarily unavailable. You can continue using manual preferences below."
+            )
+            st.session_state["ai_request_error"] = "rate_limit" if is_gemini_rate_limit_error(exc) else "unavailable"
+            error_class = "ai-error-state ai-429-state" if is_gemini_rate_limit_error(exc) else "ai-error-state"
+            st.markdown(f'<div class="{error_class}">{html.escape(error_markup)}</div>', unsafe_allow_html=True)
+elif st.session_state.get("ai_request_succeeded") and st.session_state.get("recommendation_source") == "ai":
+    summary = st.session_state.get("ai_intent_summary", {})
+    intent_chips = [*summary.get("genres", [])]
+    if summary.get("mood"):
+        intent_chips.append(summary["mood"])
+    intent_chips.extend(summary.get("keywords", []))
+    if summary.get("reference_movie"):
+        intent_chips.append(f"Reference: {summary['reference_movie']}")
+    status_markup = "".join(
+        f'<span class="intent-chip">{html.escape(str(chip))}</span>'
+        for chip in intent_chips
+    ) or '<span class="intent-chip">No supported genre or mood signal</span>'
+    st.markdown(
+        f'<div class="ai-status"><span class="ai-status-label">MOVIEMIND UNDERSTANDS</span>{status_markup}</div>',
+        unsafe_allow_html=True,
     )
-with context_mood_col:
-    selected_mood_option = st.selectbox(
-        "What are you in the mood for?",
-        options=["Any", *MOOD_GENRES],
-        key="context_mood"
-    )
+
+with st.expander("Refine your search", expanded=False):
+    st.markdown('<div class="manual-refine-label">REFINE YOUR SEARCH · MANUAL PREFERENCES</div>', unsafe_allow_html=True)
+    context_genre_col, context_mood_col = st.columns(2)
+    with context_genre_col:
+        selected_genres = st.multiselect("Genre Preference", options=GENRE_OPTIONS, placeholder="Any", key="context_genres", on_change=clear_ai_state_for_manual_context)
+    with context_mood_col:
+        selected_mood_option = st.selectbox("Mood", options=["Any", *MOOD_GENRES], key="context_mood", on_change=clear_ai_state_for_manual_context)
 selected_mood = None if selected_mood_option == "Any" else selected_mood_option
 
-st.markdown("## Personalize using my taste")
-st.caption("Choose and rate 5 to 10 movies to use MovieMind's personalized hybrid system: Taste Match 30%, Movie Similarity 30%, and Preference Learning 40%.")
-st.text_input("Profile name", key="profile_name", placeholder="Enter your name")
-selected_movies = st.multiselect("Search and select movies", options=list(movie_label_to_id), max_selections=10, placeholder="Search by title...", key="selected_movies")
-
-if selected_movies:
-    st.markdown("### Rate your movies")
-    st.caption("Each movie can be rated in half-star increments.")
-    for start in range(0, len(selected_movies), 2):
-        columns = st.columns(2)
-        for pos, column in enumerate(columns):
-            idx = start + pos
-            if idx >= len(selected_movies):
-                continue
-            label = selected_movies[idx]
-            movie_id = movie_label_to_id[label]
-            movie_info = movie_lookup.loc[movie_id]
-            with column:
-                with st.container(border=True):
-                    st.markdown(f"**{movie_info['title']}**")
-                    st.caption(str(movie_info["genres"]).replace("|", " · "))
-                    st.slider("Your rating", 0.5, 5.0, 4.0, 0.5, key=f"taste_rating_{movie_id}")
+with st.expander("Personalize using my taste", expanded=False):
+    st.caption("Rate 5 to 10 movies. Your profile uses the existing 30/30/40 hybrid recommender.")
+    st.text_input("Profile name", key="profile_name", placeholder="Enter your name")
+    selected_movies = st.multiselect("Search the MovieMind catalog", options=list(movie_label_to_id), max_selections=10, placeholder="Type a title, for example Interstellar (2014)...", key="selected_movies", help="Searches the local MovieMind movie dataset. Movie IDs distinguish duplicate titles.")
+    if selected_movies:
+        st.markdown("#### Rate your movies")
+        st.caption("Each rating uses half-star steps from 0.5 to 5.0.")
+        for start in range(0, len(selected_movies), 2):
+            columns = st.columns(2)
+            for pos, column in enumerate(columns):
+                idx = start + pos
+                if idx >= len(selected_movies):
+                    continue
+                label = selected_movies[idx]
+                movie_id = movie_label_to_id[label]
+                movie_info = movie_lookup.loc[movie_id]
+                with column:
+                    poster_col, details_col = st.columns([1, 2])
+                    metadata = get_movie_details(movie_info.get("tmdbId"))
+                    poster = get_movie_poster_image((metadata or {}).get("poster_path"))
+                    poster_col.image(poster or POSTER_PLACEHOLDER, use_container_width=True)
+                    title, year = movie_title_year(movie_info["title"])
+                    details_col.markdown(f"**{title}**")
+                    details_col.caption(year)
+                    details_col.caption(str(movie_info["genres"]).replace("|", " · "))
+                    st.slider("Your rating (0.5–5.0)", 0.5, 5.0, 4.0, 0.5, key=f"taste_rating_{movie_id}")
 
 profile_preview = [(movie_label_to_id[label], float(st.session_state.get(f"taste_rating_{movie_label_to_id[label]}", 4.0))) for label in selected_movies]
 if profile_preview:
@@ -1454,10 +1845,11 @@ if profile_preview:
     m2.metric("Average Rating", f"{np.mean([r for _, r in profile_preview]):.1f} / 5")
     m3.metric("Leading Genre", leading_genre)
 
-b1, b2, b3 = st.columns([2, 1, 1])
-generate = b1.button("Generate Recommendations", type="primary", use_container_width=True)
-save_profile = b2.button("Save Profile", use_container_width=True)
-reset = b3.button("Reset Profile", use_container_width=True, on_click=reset_profile_state)
+action_cols = st.columns([2, 1, 1, 1])
+generate = action_cols[0].button("Show Recommendations", type="primary", use_container_width=True, on_click=clear_ai_state_for_manual_context)
+surprise = action_cols[1].button("Surprise Me", use_container_width=True, on_click=clear_ai_state_for_manual_context)
+save_profile = action_cols[2].button("Save Profile", use_container_width=True)
+reset = action_cols[3].button("Reset Profile", use_container_width=True, on_click=reset_profile_state)
 
 if save_profile:
     if not st.session_state.get("profile_name", "").strip():
@@ -1477,36 +1869,50 @@ if save_profile:
         st.session_state["profile"] = profile_preview
         st.success("Profile saved locally.")
 
-if generate:
-    valid_profile = 5 <= len(profile_preview) <= 10
-    has_context = bool(selected_genres or selected_mood)
+effective_genres = ai_context["genres"] if ai_context is not None else list(selected_genres)
+effective_mood = ai_context["mood"] if ai_context is not None else selected_mood
+
+if generate or surprise or ai_context is not None:
+    active_saved_profile = st.session_state.get("profile", [])
+    use_profile = profile_preview if 5 <= len(profile_preview) <= 10 else active_saved_profile
+    valid_profile = 5 <= len(use_profile) <= 10
+    has_context = bool(effective_genres or effective_mood)
+    source = "ai" if ai_context is not None else "manual"
     if not valid_profile and not has_context:
-        st.warning("Choose a genre or mood, or rate 5 to 10 movies, before generating recommendations.")
+        st.session_state["recommendations"] = pd.DataFrame()
+        st.session_state["recommendation_source"] = source
+        st.session_state["recommendation_context"] = {"genres": [], "mood": None}
+        if st.session_state.get("ai_reference_movie_id") is None:
+            st.warning("Choose a genre or mood, rate 5 to 10 movies, or describe a movie intent for MovieMind AI.")
+        else:
+            st.info("No local genre or mood signal was found. MovieMind can still show catalog similarity for a recognized reference movie.")
     else:
         if valid_profile:
             mode = "combined" if has_context else "personalized"
-            with st.spinner("Building your recommendations..."):
-                st.session_state["recommendations"] = get_recommendations(
-                    profile_preview,
-                    selected_genres=selected_genres,
-                    selected_mood=selected_mood
-                )
-            st.session_state["profile"] = profile_preview
+            with st.spinner("Finding movies with your MovieMind profile..."):
+                result_frame = get_recommendations(use_profile, selected_genres=effective_genres, selected_mood=effective_mood)
+            st.session_state["profile"] = use_profile
         else:
             mode = "current"
-            with st.spinner("Finding movies for your current viewing intent..."):
-                st.session_state["recommendations"] = get_current_viewing_recommendations(
-                    selected_genres=selected_genres,
-                    selected_mood=selected_mood
-                )
+            with st.spinner("Finding movies for your viewing intent..."):
+                result_frame = get_current_viewing_recommendations(selected_genres=effective_genres, selected_mood=effective_mood)
             st.session_state["profile"] = []
-        st.session_state["recommendation_context"] = {
-            "genres": list(selected_genres),
-            "mood": selected_mood,
-        }
+        st.session_state["recommendations"] = result_frame.head(1) if surprise else result_frame
+        st.session_state["recommendation_context"] = {"genres": list(effective_genres), "mood": effective_mood}
         st.session_state["recommendation_mode"] = mode
-        st.session_state["recommendation_profile"] = list(profile_preview) if valid_profile else []
-        st.success("Your recommendations are ready.")
+        st.session_state["recommendation_source"] = source
+        st.session_state["recommendation_profile"] = list(use_profile) if valid_profile else []
+        st.session_state["surprise_result"] = bool(surprise)
+        st.session_state.pop("more_like_movie_id", None)
+        st.session_state.pop("more_like_results", None)
+        st.session_state.pop("details_movie_id", None)
+        st.session_state.pop("selected_hero_movie_id", None)
+        if surprise:
+            st.success("Here’s a MovieMind recommendation based on your current profile and viewing intent.")
+        elif source == "ai":
+            st.success("MovieMind translated your request into its existing viewing context and recommendation system.")
+        else:
+            st.success("Your recommendations are ready.")
 
 active_profile = profile_preview
 stored_profile = st.session_state.get("profile", [])
@@ -1515,103 +1921,158 @@ generated_context = st.session_state.get("recommendation_context", {"genres": []
 generated_mode = st.session_state.get("recommendation_mode", "personalized")
 if (
     (generated_mode != "current" and stored_profile != profile_preview)
-    or generated_context.get("genres", []) != list(selected_genres)
-    or generated_context.get("mood") != selected_mood
+    or (st.session_state.get("recommendation_source") != "ai" and (
+        generated_context.get("genres", []) != list(selected_genres)
+        or generated_context.get("mood") != selected_mood
+    ))
     or (generated_mode != "current" and st.session_state.get("recommendation_profile", []) != list(profile_preview))
 ):
     recommendations = pd.DataFrame()
-recommendation_tab, taste_tab, history_tab, evaluation_tab, about_tab = st.tabs(["Recommendations", "My Taste", "Rating History", "Model Performance", "About MovieMind"])
+taste_rows = [
+    {"Movie": movie_lookup.loc[mid, "title"], "Rating": rating, "Genres": str(movie_lookup.loc[mid, "genres"]).replace("|", " · ")}
+    for mid, rating in active_profile if mid in movie_lookup.index
+]
+taste_df = pd.DataFrame(taste_rows)
 
-with recommendation_tab:
+if active_view == "Recommendations":
     current_mode = st.session_state.get("recommendation_mode", "personalized")
-    if current_mode == "current":
-        st.markdown("### Recommendations for your viewing intent")
-        st.caption("Viewing Intent Match reflects movie genre metadata and your current genre and mood preferences; it is not a probability.")
-    else:
-        st.markdown("### MovieMind Match")
-        st.caption("The Match percentage is a normalized hybrid recommendation score, not a probability that you will like the movie.")
+    recommendation_source = st.session_state.get("recommendation_source", "manual")
+    current_context = st.session_state.get("recommendation_context", {"genres": [], "mood": None})
+    context_genres = current_context.get("genres", [])
+    context_mood = current_context.get("mood")
+    has_context = bool(context_genres or context_mood)
+    reference_results = st.session_state.get("ai_reference_results", pd.DataFrame())
+    reference_similarities = (
+        dict(zip(reference_results["movieId"].astype(int), reference_results["similarity"].astype(float)))
+        if isinstance(reference_results, pd.DataFrame)
+        and not reference_results.empty
+        and {"movieId", "similarity"}.issubset(reference_results.columns)
+        else {}
+    )
+    if not recommendations.empty and (has_context or reference_similarities):
+        recommendations = recommendations.copy()
+        intent_details = [
+            get_intent_match_details(
+                movie.get("genres", ""),
+                context_genres,
+                context_mood,
+                reference_similarities.get(int(movie["movieId"])),
+            )
+            for _, movie in recommendations.iterrows()
+        ]
+        recommendations["intent_match"] = [item[0] for item in intent_details]
+        recommendations["intent_explanation"] = [item[1] for item in intent_details]
+    if recommendation_source == "ai":
+        st.markdown("### MovieMind understood")
+        summary = st.session_state.get("ai_intent_summary", {})
+        chips = [*summary.get("genres", [])]
+        if summary.get("mood"):
+            chips.append(summary["mood"])
+        if summary.get("reference_movie"):
+            chips.append(f"Reference: {summary['reference_movie']}")
+        chips.extend(summary.get("keywords", []))
+        st.markdown("".join(f'<span class="intent-chip">{html.escape(str(chip))}</span>' for chip in chips) or '<span class="intent-chip">No supported genre or mood signal</span>', unsafe_allow_html=True)
+        if summary.get("unsupported_genres") or summary.get("unsupported_mood"):
+            st.caption("Some intent terms were not available in the local MovieMind context and were skipped.")
+        if st.session_state.get("ai_reference_missing"):
+            st.info("Reference movie not found in the MovieMind catalog. The rest of your request is still active.")
     if recommendations.empty:
-        st.info("Choose a genre or mood, or rate 5 to 10 movies. You can use either path or provide both.")
+        st.markdown('<div class="row-heading">Your movie night, your way</div><div class="row-caption">Start with a natural-language request, choose a genre or mood, or build a taste profile.</div>', unsafe_allow_html=True)
+        if recommendation_source == "ai" and st.session_state.get("ai_reference_movie_id") is not None:
+            reference_id = int(st.session_state["ai_reference_movie_id"])
+            reference_title = movie_lookup.loc[reference_id, "title"]
+            reference_results = st.session_state.get("ai_reference_results", pd.DataFrame())
+            render_movie_row(f"Because you mentioned {reference_title}", reference_results, "similarity", current_context, "ai_reference_empty", "Neighbors from MovieMind’s existing item-similarity model.")
     else:
-        current_context = st.session_state.get("recommendation_context", {"genres": [], "mood": None})
-        context_genres = current_context.get("genres", [])
-        context_mood = current_context.get("mood")
-        has_context = bool(context_genres or context_mood)
-        st.markdown("#### Your current viewing intent")
-        st.caption(f"Genre: {', '.join(context_genres) if context_genres else 'Any'}")
-        st.caption(f"What are you in the mood for?: {context_mood or 'Any'}")
-        mode_label = {
-            "current": "Recommend by what I want to watch",
-            "personalized": "Personalize using my taste",
-            "combined": "Personalized taste + current viewing intent",
-        }.get(current_mode, "Personalize using my taste")
-        st.caption(f"Recommendation mode: {mode_label}")
-        if current_mode == "current":
-            st.caption("Ranked from movie genre metadata and current viewing intent. No rated movies are required.")
-        elif current_mode == "combined":
-            st.caption("The 30/30/40 personalized hybrid is adjusted by your current viewing context.")
-        for _, movie in recommendations.iterrows():
-            user_score, item_score, svd_score = (float(movie[k]) for k in ("user_score", "item_score", "svd_score"))
-            score = float(movie["hybrid_score"])
-            contributions = {"Taste Match": .30 * user_score, "Movie Similarity": .30 * item_score, "Preference Learning": .40 * svd_score}
-            strongest = max(contributions, key=contributions.get)
-            strength = "Very strong match" if score >= .8 else "Strong match" if score >= .6 else "Good match" if score >= .4 else "Potential match"
-            with st.container(border=True):
-                left, right = st.columns([5, 1])
-                left.caption(f"RANK {int(movie['rank'])}")
-                left.markdown(f"### {movie['title']}")
-                left.caption(str(movie["genres"]).replace("|", " · "))
-                right.metric("Viewing Intent Match" if current_mode == "current" else "MovieMind Match", f"{score:.0%}")
-                st.progress(float(np.clip(score, 0, 1)))
-                if current_mode == "current":
-                    st.caption(f"{strength} for your selected genre and mood preferences.")
-                else:
-                    st.caption(f"{strength} · Main signal: {strongest}")
-                if has_context:
-                    st.caption(
-                        f"Current viewing intent: {' + '.join(context_genres) if context_genres else ''}"
-                        f"{' · ' if context_genres and context_mood else ''}"
-                        f"{f'What are you in the mood for?: {context_mood}' if context_mood else ''}"
-                    )
-                    if bool(movie.get("context_applied", False)):
-                        relevance = float(movie["context_score"])
-                        relevance_label = "Strong" if relevance >= 0.75 else "Good" if relevance >= 0.4 else "Low"
-                        st.caption(f"Context: {relevance_label} match for your current viewing preference.")
-                    else:
-                        st.caption("No candidates matched this context; the personalized ranking was retained.")
-                if current_mode != "current":
-                    c1, c2, c3 = st.columns(3)
-                    c1.metric("Taste Match", f"{contributions['Taste Match']:.1%}")
-                    c2.metric("Movie Similarity", f"{contributions['Movie Similarity']:.1%}")
-                    c3.metric("Preference Learning", f"{contributions['Preference Learning']:.1%}")
-                with st.expander("View recommendation details"):
-                    if current_mode == "current":
-                        st.write("This recommendation uses movie genre metadata and your current viewing intent. Mood is mapped to related genres for ranking; it is not a movie attribute or a separate model.")
-                        st.caption(f"Viewing intent relevance score: {float(movie['context_score']):.4f}.")
-                    else:
-                        st.write("Taste Match — User-Based Collaborative Filtering compares the profile with nearby existing users using centered rating deviations.")
-                        st.write("Movie Similarity — Item-Based Collaborative Filtering combines similarities to the movies you rated.")
-                        st.write("Preference Learning — SVD Matrix Factorization infers a temporary latent profile from your ratings.")
-                        st.caption(f"Normalized model scores: Taste Match {user_score:.4f}; Movie Similarity {item_score:.4f}; Preference Learning {svd_score:.4f}. Hybrid = 0.30 × Taste + 0.30 × Similarity + 0.40 × Preference = {float(movie['base_hybrid_score']):.4f}.")
-                    if has_context and current_mode != "current":
-                        if bool(movie.get("context_applied", False)):
-                            st.caption(f"Base hybrid: {float(movie['base_hybrid_score']):.4f}; context relevance: {float(movie['context_score']):.4f}; final = 0.85 × base + 0.15 × context = {score:.4f}.")
-                        else:
-                            st.caption(f"No meaningful contextual matches were available; final score remains the base hybrid score of {score:.4f}.")
-                    st.caption(f"Movie Similarity support: {float(movie['item_support']):.3f} cumulative cosine similarity.")
-                links_out = []
-                imdb_id, tmdb_id = movie.get("imdbId"), movie.get("tmdbId")
-                if pd.notna(imdb_id) and int(imdb_id) > 0:
-                    links_out.append(f"[IMDb](https://www.imdb.com/title/tt{int(imdb_id):07d}/)")
-                if pd.notna(tmdb_id) and int(tmdb_id) > 0:
-                    links_out.append(f"[TMDB](https://www.themoviedb.org/movie/{int(tmdb_id)})")
-                if links_out:
-                    st.markdown(" · ".join(links_out))
+        st.caption("MovieMind Match is a normalized recommendation score, not a probability." if current_mode != "current" else "Viewing Intent Match summarizes verified catalog signals. It is separate from recommendation ranking.")
+        if current_context.get("genres") or current_context.get("mood"):
+            st.markdown("".join(f'<span class="intent-chip">{html.escape(str(chip))}</span>' for chip in [*context_genres, *([context_mood] if context_mood else [])]), unsafe_allow_html=True)
+        hero_id = st.session_state.get("selected_hero_movie_id")
+        hero_rows = recommendations.loc[recommendations["movieId"].astype(int) == int(hero_id)] if hero_id is not None else pd.DataFrame()
+        hero_movie = hero_rows.iloc[0] if not hero_rows.empty else recommendations.iloc[0]
+        render_hero(hero_movie, current_mode, current_context)
 
-with taste_tab:
+        details_id = st.session_state.get("details_movie_id")
+        if details_id is not None:
+            detail_rows = recommendations.loc[recommendations["movieId"].astype(int) == int(details_id)]
+            if not detail_rows.empty:
+                detail_movie = detail_rows.iloc[0]
+                detail_metadata = get_movie_details(detail_movie.get("tmdbId"))
+                detail_poster = get_movie_poster_image((detail_metadata or {}).get("poster_path"))
+                detail_backdrop = get_movie_backdrop_image((detail_metadata or {}).get("backdrop_path"))
+                detail_left, detail_right = st.columns([1, 3])
+                with detail_left:
+                    st.image(detail_poster or POSTER_PLACEHOLDER, use_container_width=True)
+                with detail_right:
+                    title, year = movie_title_year(detail_movie["title"])
+                    st.markdown(f"### {title}")
+                    st.caption(f"{year} · {str(detail_movie['genres']).replace('|', ' · ')}")
+                    if detail_backdrop:
+                        st.image(detail_backdrop, use_container_width=True)
+                    overview = (detail_metadata or {}).get("overview", "").strip()
+                    if overview:
+                        st.write(overview)
+                    if current_mode == "current" and detail_movie.get("intent_match") is not None and pd.notna(detail_movie.get("intent_match")):
+                        st.metric("Viewing Intent Match", f"{int(detail_movie['intent_match'])}%")
+                        if detail_movie.get("intent_explanation"):
+                            st.caption(str(detail_movie["intent_explanation"]))
+                    else:
+                        st.metric("MovieMind Match", f"{float(detail_movie['hybrid_score']):.0%}")
+                    st.markdown(f"**Why MovieMind picked this**  \n{signal_explanation(detail_movie, current_mode, current_context)}")
+                    if current_mode != "current":
+                        details = st.expander("View model details")
+                        with details:
+                            st.write(f"Taste Match contribution: {0.30 * float(detail_movie['user_score']):.1%}")
+                            st.write(f"Movie Similarity contribution: {0.30 * float(detail_movie['item_score']):.1%}")
+                            st.write(f"Preference Learning contribution: {0.40 * float(detail_movie['svd_score']):.1%}")
+                    detail_links = []
+                    if pd.notna(detail_movie.get("imdbId")) and int(detail_movie["imdbId"]) > 0:
+                        detail_links.append(f"[IMDb](https://www.imdb.com/title/tt{int(detail_movie['imdbId']):07d}/)")
+                    if pd.notna(detail_movie.get("tmdbId")) and int(detail_movie["tmdbId"]) > 0:
+                        detail_links.append(f"[TMDB](https://www.themoviedb.org/movie/{int(detail_movie['tmdbId'])})")
+                    if detail_links:
+                        st.markdown(" · ".join(detail_links))
+                    close_col, _ = st.columns([1, 4])
+                    if close_col.button("Close details", key=f"close_details_{int(detail_movie['movieId'])}"):
+                        st.session_state.pop("details_movie_id", None)
+
+        if recommendation_source == "ai" and st.session_state.get("ai_reference_movie_id") is not None:
+            reference_id = int(st.session_state["ai_reference_movie_id"])
+            reference_title = movie_lookup.loc[reference_id, "title"]
+            reference_results = st.session_state.get("ai_reference_results", pd.DataFrame())
+            render_movie_row(f"Because you mentioned {reference_title}", reference_results, "similarity", current_context, "ai_reference", "Neighbors from MovieMind’s existing item-similarity model.")
+
+        if st.session_state.get("surprise_result"):
+            main_title = "Your Surprise Pick"
+        elif recommendation_source == "ai":
+            main_title = "AI-Powered Viewing Results"
+        elif current_mode == "current":
+            main_title = "Current Viewing"
+        else:
+            main_title = "Highly Matched For You"
+        render_movie_row(main_title, recommendations, current_mode, current_context, "primary", "Ranked by the existing MovieMind recommendation system.")
+
+        if current_mode != "current" and len(recommendations) >= 3:
+            profile_strength = np.maximum(.30 * recommendations["user_score"].astype(float), .30 * recommendations["item_score"].astype(float))
+            because = recommendations.loc[profile_strength > 0].copy()
+            if len(because) >= 3:
+                because["_profile_signal"] = np.maximum(.30 * because["user_score"].astype(float), .30 * because["item_score"].astype(float))
+                because = because.sort_values("_profile_signal", ascending=False).head(5).drop(columns="_profile_signal")
+                render_movie_row("Because You Like…", because, current_mode, current_context, "profile", "Movies with existing Taste Match or Movie Similarity contribution in this profile run.")
+
+        if has_context and current_mode != "current" and len(recommendations) >= 3:
+            current = recommendations.loc[recommendations["context_score"].fillna(0).astype(float) > 0].head(5)
+            if len(current) >= 3:
+                render_movie_row("Current Viewing", current, "current", current_context, "context", "Intent match summarizes verified genre and mood signals; recommendation ranking is unchanged.")
+
+        more_like_id = st.session_state.get("more_like_movie_id")
+        if more_like_id is not None:
+            more_like_results = st.session_state.get("more_like_results", pd.DataFrame())
+            source_title = st.session_state.get("more_like_source_title") or movie_lookup.loc[more_like_id, "title"]
+            render_movie_row(f"More Like {source_title}", more_like_results, "similarity", current_context, "more_like", "Cosine similarity from the existing Item-Based CF model; separate from MovieMind Match.")
+
+if active_view == "My Taste":
     st.markdown("### Selected movies and ratings")
-    taste_rows = [{"Movie": movie_lookup.loc[mid, "title"], "Rating": rating, "Genres": str(movie_lookup.loc[mid, "genres"]).replace("|", " · ")} for mid, rating in active_profile if mid in movie_lookup.index]
-    taste_df = pd.DataFrame(taste_rows)
     if taste_df.empty:
         st.info("Your taste profile will appear here after you select movies.")
     else:
@@ -1627,7 +2088,7 @@ with taste_tab:
     st.write(f"Genre: {', '.join(current_context.get('genres', [])) or 'Any'}")
     st.write(f"What are you in the mood for?: {current_context.get('mood') or 'Any'}")
 
-with history_tab:
+if active_view == "Rating History":
     st.markdown("### Rating History")
     if taste_df.empty:
         st.info("Ratings for the current profile will appear here.")
@@ -1635,7 +2096,7 @@ with history_tab:
         st.dataframe(taste_df, use_container_width=True, hide_index=True)
         st.download_button("Download rating history as CSV", taste_df.to_csv(index=False).encode("utf-8"), "moviemind_rating_history.csv", "text/csv")
 
-with evaluation_tab:
+if active_view == "Model Performance":
     st.markdown("### How MovieMind Recommends")
     st.caption("These are the live weights used in Personalize using my taste and combined recommendation modes. Current Viewing mode ranks from genre metadata and mood mapping without a rated profile.")
     signal_columns = st.columns(3)
@@ -1688,16 +2149,19 @@ with evaluation_tab:
     else:
         st.caption("No current genre or mood context is selected. Personalized scores remain unchanged.")
 
-with about_tab:
+if active_view == "About MovieMind":
     st.markdown("### What MovieMind does")
     st.write("MovieMind supports current viewing recommendations from genre and mood preferences without requiring ratings, personalized recommendations from a 5 to 10 movie taste profile, or a combination of both.")
     st.markdown("### Recommendation approach")
     st.write("MovieMind combines long-term taste preferences, collaborative filtering, matrix factorization, and current viewing intent. The core hybrid remains 30% Taste Match + 30% Movie Similarity + 40% Preference Learning. A ridge-regression step infers a temporary SVD profile for new visitors from their selected ratings.")
     st.write("Genre comes from movie metadata. Mood is derived from an editable mood-to-genre mapping; it is not a native dataset field. Context is an optional ranking adjustment, not a fourth ML model.")
     st.write("The internal hybrid score ranges from 0 to 1 and is displayed as a percentage. It is a normalized recommendation score, not a probability.")
+    st.write("Gemini AI interprets natural-language viewing requests and maps supported genres and moods into MovieMind’s existing context inputs. The existing ML recommendation system ranks the results. TMDB supplies movie metadata and images.")
     st.markdown("### Data, storage, and technology")
     st.write(f"The development dataset contains {len(user_ids):,} users, {len(movies):,} movies, and {len(ratings):,} ratings. Ratings remain in a sparse matrix to avoid a large dense allocation. Saved profile names and movie ratings are stored locally in data/user_profiles.json; no passwords or sensitive information are requested.")
     st.write("Technology stack: Python, Streamlit, Pandas, NumPy, SciPy, scikit-learn, and Surprise.")
+    st.markdown("### TMDB attribution")
+    st.write("Movie metadata and images are provided by TMDB. This product uses the TMDB API but is not endorsed or certified by TMDB.")
 
 st.divider()
 st.markdown('<div class="footer-text">MovieMind | Personalized Hybrid Movie Recommendation System</div>', unsafe_allow_html=True)
