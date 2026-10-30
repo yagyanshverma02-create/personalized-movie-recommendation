@@ -35,6 +35,7 @@ def get_gemini_client():
     )
 
 
+@st.cache_data(ttl=60 * 60, max_entries=256, show_spinner=False)
 def parse_movie_intent(user_text: str) -> MovieIntent:
     """Convert natural-language movie preferences into structured intent."""
 
@@ -76,3 +77,39 @@ User request:
     )
 
     return MovieIntent.model_validate_json(interaction.output_text)
+
+
+def transcribe_speech_to_text(audio_bytes: bytes, mime_type: str = "audio/wav") -> str:
+    """Transcribe spoken audio bytes into English text using Gemini.
+
+    Audio is processed strictly in-memory and is never stored permanently.
+    """
+    if not audio_bytes:
+        return ""
+    import re
+
+    client = get_gemini_client()
+    part = genai.types.Part.from_bytes(data=audio_bytes, mime_type=mime_type)
+    prompt = (
+        "Please transcribe the spoken words in this audio into English accurately. "
+        "Return ONLY the verbatim spoken words as plain text. "
+        "Do not include timestamps, labels, notes, or explanations. "
+        "If there is no speech, silence, or unintelligible background noise, respond with EMPTY."
+    )
+    response = client.models.generate_content(
+        model="gemini-3.5-flash-lite",
+        contents=[part, prompt],
+    )
+    text = (response.text or "").strip()
+    text = re.sub(r"\[\d{1,2}:\d{2}(?::\d{2})?\]", "", text).strip()
+    if not re.search(r"[A-Za-z]", text) or text.upper() in {
+        "EMPTY",
+        "EMPTY.",
+        "NO SPEECH",
+        "NO SPEECH.",
+        "SILENCE",
+        "SILENCE.",
+    }:
+        return ""
+    return text
+
