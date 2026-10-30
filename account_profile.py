@@ -28,29 +28,32 @@ def _supabase_config(profile_path: Path = PROFILE_PATH) -> tuple[str, str] | Non
     try:
         import streamlit as st
         url = str(st.secrets["SUPABASE_URL"]).rstrip("/")
-        key = str(st.secrets["SUPABASE_SERVICE_ROLE_KEY"])
+        key = str(st.secrets.get("SUPABASE_SECRET_KEY") or st.secrets.get("SUPABASE_SERVICE_ROLE_KEY", ""))
     except Exception:
-        raise RuntimeError("Hosted database is not configured. Add SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY to Streamlit Secrets.") from None
+        raise RuntimeError("Hosted database is not configured. Add SUPABASE_URL and SUPABASE_SECRET_KEY to Streamlit Secrets.") from None
     if not url or not key:
-        raise RuntimeError("Hosted database is not configured. Add SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY to Streamlit Secrets.")
+        raise RuntimeError("Hosted database is not configured. Add SUPABASE_URL and SUPABASE_SECRET_KEY to Streamlit Secrets.")
     return url, key
 
 
 def _supabase_request(path: str, method: str = "GET", *, params=None, payload=None):
     config = _supabase_config()
     if not config:
-        raise RuntimeError("Hosted database is not configured. Add SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY to Streamlit Secrets.")
+        raise RuntimeError("Hosted database is not configured. Add SUPABASE_URL and SUPABASE_SECRET_KEY to Streamlit Secrets.")
     url, key = config
+    headers = {
+        "apikey": key,
+        "Content-Type": "application/json",
+        "Prefer": "resolution=merge-duplicates,return=minimal",
+    }
+    # New sb_secret keys are API keys, not JWTs; legacy service_role keys are JWTs.
+    if not key.startswith("sb_secret_"):
+        headers["Authorization"] = f"Bearer {key}"
     try:
         response = requests.request(
             method,
             f"{url}/rest/v1/{path}",
-            headers={
-                "apikey": key,
-                "Authorization": f"Bearer {key}",
-                "Content-Type": "application/json",
-                "Prefer": "resolution=merge-duplicates,return=minimal",
-            },
+            headers=headers,
             params=params,
             json=payload,
             timeout=_SUPABASE_TIMEOUT,
