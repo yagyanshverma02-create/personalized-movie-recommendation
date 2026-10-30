@@ -1623,7 +1623,7 @@ def get_active_watch_later_entries(profiles=None):
 
 
 def toggle_active_watch_later(movie):
-    """Persist one add/remove operation through the existing local profile file."""
+    """Persist one add/remove operation through the configured profile store."""
     profiles = load_profiles()
     profile_id = st.session_state.get("profile_id")
     if not profile_id:
@@ -3085,7 +3085,7 @@ if active_view == "About MovieMind":
     st.markdown("#### Recommendation approach")
     st.write("The personalized hybrid combines Taste Match (30%), Movie Similarity (30%), and Preference Learning (40%). Gemini maps natural-language requests to supported genre and mood signals; the existing recommendation engine ranks the results. TMDB provides discovery metadata and images.")
     st.markdown("#### Your data")
-    st.write(f"The local dataset contains {len(user_ids):,} users, {len(movies):,} movies, and {len(ratings):,} ratings. Saved profiles and ratings are stored locally in data/user_profiles.json.")
+    st.write(f"The local movie dataset contains {len(user_ids):,} users, {len(movies):,} movies, and {len(ratings):,} ratings. Account profiles and saved ratings are stored in the configured account database.")
     st.markdown("#### Project")
     st.write("MovieMind · B.Tech Computer Science & Engineering · ABES Engineering College")
     st.write("Movie metadata and images are provided by TMDB. This product uses the TMDB API but is not endorsed or certified by TMDB.")
@@ -3340,7 +3340,7 @@ if save_profile:
             record["name"],
             tuple(sorted(profile_preview)),
         )
-        st.success("Profile saved locally.")
+        st.success("Profile saved to your account.")
 
 effective_genres = ai_context["genres"] if ai_context is not None else list(selected_genres)
 effective_mood = ai_context["mood"] if ai_context is not None else selected_mood

@@ -1,4 +1,4 @@
-"""Link verified Gmail accounts to MovieMind's existing JSON profiles."""
+"""Store MovieMind profiles and password hashes in Supabase when configured."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ import hmac
 import os
 import sqlite3
 import uuid
+import requests
 from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
@@ -17,6 +18,47 @@ PROFILE_PATH = Path(__file__).resolve().parent / "data" / "user_profiles.json"
 ACCOUNT_DB_PATH = Path(__file__).resolve().parent / "data" / "accounts.sqlite3"
 _GMAIL_PATTERN = r"^[a-zA-Z0-9._%+\-]+@gmail\.com$"
 _PASSWORD_ITERATIONS = 310_000
+_SUPABASE_TIMEOUT = 15
+
+
+def _supabase_config(profile_path: Path = PROFILE_PATH) -> tuple[str, str] | None:
+    """Require hosted storage for app data; explicit temporary test paths stay local."""
+    if Path(profile_path) != PROFILE_PATH:
+        return None
+    try:
+        import streamlit as st
+        url = str(st.secrets["SUPABASE_URL"]).rstrip("/")
+        key = str(st.secrets["SUPABASE_SERVICE_ROLE_KEY"])
+    except Exception:
+        raise RuntimeError("Hosted database is not configured. Add SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY to Streamlit Secrets.") from None
+    if not url or not key:
+        raise RuntimeError("Hosted database is not configured. Add SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY to Streamlit Secrets.")
+    return url, key
+
+
+def _supabase_request(path: str, method: str = "GET", *, params=None, payload=None):
+    config = _supabase_config()
+    if not config:
+        raise RuntimeError("Hosted database is not configured. Add SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY to Streamlit Secrets.")
+    url, key = config
+    try:
+        response = requests.request(
+            method,
+            f"{url}/rest/v1/{path}",
+            headers={
+                "apikey": key,
+                "Authorization": f"Bearer {key}",
+                "Content-Type": "application/json",
+                "Prefer": "resolution=merge-duplicates,return=minimal",
+            },
+            params=params,
+            json=payload,
+            timeout=_SUPABASE_TIMEOUT,
+        )
+        response.raise_for_status()
+    except requests.RequestException as exc:
+        raise RuntimeError("Hosted database request failed. Check Supabase secrets and table setup.") from exc
+    return response.json() if response.content else None
 
 
 def normalize_username(username: str) -> str | None:
@@ -46,6 +88,9 @@ def clear_auth_session(session_state) -> None:
 
 
 def load_profiles(profile_path: Path = PROFILE_PATH) -> list[dict]:
+    if _supabase_config(profile_path):
+        rows = _supabase_request("account_profiles", params={"select": "profile"}) or []
+        return [row["profile"] for row in rows if isinstance(row.get("profile"), dict)]
     try:
         with open(profile_path, "r", encoding="utf-8") as profile_file:
             profiles = json.load(profile_file)
@@ -55,6 +100,14 @@ def load_profiles(profile_path: Path = PROFILE_PATH) -> list[dict]:
 
 
 def save_profiles(profiles: list[dict], profile_path: Path = PROFILE_PATH) -> None:
+    if _supabase_config(profile_path):
+        rows = [
+            {"profile_id": item["profile_id"], "email": item["email"].strip().lower(), "profile": item}
+            for item in profiles if item.get("profile_id") and item.get("email")
+        ]
+        if rows:
+            _supabase_request("account_profiles?on_conflict=profile_id", "POST", payload=rows)
+        return
     with open(profile_path, "w", encoding="utf-8") as profile_file:
         json.dump(profiles, profile_file, indent=2, ensure_ascii=False)
 
@@ -91,6 +144,13 @@ def _store_password_record(
     updated_at: str,
     profile_path: Path,
 ) -> None:
+    if _supabase_config(profile_path):
+        _supabase_request("account_credentials?on_conflict=email", "POST", payload=[{
+            "email": email.strip().lower(), "password_salt": salt,
+            "password_hash": password_hash, "password_iterations": iterations,
+            "updated_at": updated_at,
+        }])
+        return
     with closing(_connect_account_db(profile_path)) as connection:
         with connection:
             connection.execute(
@@ -122,7 +182,10 @@ def _migrate_legacy_passwords(profiles: list[dict], profile_path: Path) -> bool:
             iterations = int(profile.get("password_iterations", _PASSWORD_ITERATIONS))
         except (TypeError, ValueError):
             iterations = _PASSWORD_ITERATIONS
-        _store_password_record(email, str(salt), str(password_hash), iterations, updated_at, profile_path)
+        try:
+            _store_password_record(email, str(salt), str(password_hash), iterations, updated_at, profile_path)
+        except (requests.RequestException, RuntimeError) as exc:
+            raise RuntimeError("Hosted database is unavailable or its tables are not configured.") from exc
         for key in ("password_salt", "password_hash", "password_iterations"):
             profile.pop(key, None)
         changed = True
@@ -139,6 +202,8 @@ def set_account_password(email: str, password: str, profile_path: Path = PROFILE
         _migrate_legacy_passwords(profiles, profile_path)
     except sqlite3.Error:
         return False
+    except (requests.RequestException, RuntimeError) as exc:
+        raise RuntimeError("Hosted database is unavailable or its tables are not configured.") from exc
     profile = next((item for item in profiles if str(item.get("email", "")).strip().lower() == normalized_email), None)
     if profile is None or not isinstance(password, str) or not 8 <= len(password) <= 128:
         return False
@@ -156,6 +221,8 @@ def set_account_password(email: str, password: str, profile_path: Path = PROFILE
         )
     except sqlite3.Error:
         return False
+    except (requests.RequestException, RuntimeError) as exc:
+        raise RuntimeError("Hosted database is unavailable or its tables are not configured.") from exc
     profile["updated_at"] = updated_at
     save_profiles(profiles, profile_path)
     return True
@@ -173,12 +240,19 @@ def verify_account_password(email: str, password: str, profile_path: Path = PROF
     if profile is None or not isinstance(password, str):
         return None
     try:
-        with closing(_connect_account_db(profile_path)) as connection:
-            record = connection.execute(
-                """SELECT password_salt, password_hash, password_iterations
-                   FROM account_credentials WHERE email = ? COLLATE NOCASE""",
-                (normalized_email,),
-            ).fetchone()
+        if _supabase_config(profile_path):
+            records = _supabase_request("account_credentials", params={
+                "select": "password_salt,password_hash,password_iterations",
+                "email": f"eq.{normalized_email}", "limit": "1",
+            }) or []
+            record = tuple(records[0].get(key) for key in ("password_salt", "password_hash", "password_iterations")) if records else None
+        else:
+            with closing(_connect_account_db(profile_path)) as connection:
+                record = connection.execute(
+                    """SELECT password_salt, password_hash, password_iterations
+                       FROM account_credentials WHERE email = ? COLLATE NOCASE""",
+                    (normalized_email,),
+                ).fetchone()
         if not record:
             return None
         salt = bytes.fromhex(record[0])
@@ -187,6 +261,8 @@ def verify_account_password(email: str, password: str, profile_path: Path = PROF
         if iterations < 100_000 or iterations > 2_000_000:
             return None
         actual = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iterations)
+    except (requests.RequestException, RuntimeError) as exc:
+        raise RuntimeError("Hosted database is unavailable or its tables are not configured.") from exc
     except (sqlite3.Error, TypeError, ValueError):
         return None
     return profile if hmac.compare_digest(actual, expected) else None
@@ -199,6 +275,27 @@ def get_or_create_account_profile(
 ) -> tuple[dict, list[dict]]:
     """Return the persistent profile for a verified email, creating it once."""
     normalized_email = email.strip().lower()
+    if _supabase_config(profile_path):
+        rows = _supabase_request("account_profiles", params={
+            "select": "profile", "email": f"eq.{normalized_email}", "limit": "1",
+        }) or []
+        if rows and isinstance(rows[0].get("profile"), dict):
+            profile = rows[0]["profile"]
+            display_name = normalize_username(username) if username is not None else None
+            if display_name and profile.get("name") != display_name:
+                profile["name"] = display_name
+                profile["updated_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+                save_profiles([profile])
+            return profile, load_profiles()
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        display_name = normalize_username(username) if username is not None else None
+        profile = {
+            "profile_id": f"MM-{uuid.uuid4().hex[:6].upper()}", "email": normalized_email,
+            "name": display_name or normalized_email.split("@", 1)[0].replace(".", " ").title(),
+            "movies": [], "watch_later": [], "created_at": now, "updated_at": now,
+        }
+        save_profiles([profile])
+        return profile, load_profiles()
     profiles = load_profiles(profile_path)
     existing = next(
         (

@@ -397,11 +397,18 @@ header { display: none !important; }
                     elif not password_input:
                         st.error("Enter your password.")
                     else:
-                        profile = verify_account_password(email_clean, password_input)
+                        try:
+                            profile = verify_account_password(email_clean, password_input)
+                        except RuntimeError:
+                            st.error("The account database is unavailable or not configured. Check the app's Supabase settings.")
+                            profile = None
+                            database_error = True
+                        else:
+                            database_error = False
                         if profile:
                             _complete_password_authentication(profile)
                             st.rerun()
-                        else:
+                        elif not database_error:
                             st.error("Email or password is incorrect. If you have not set a password yet, use email verification once, then set one in Account settings.")
                 if st.button("Use email verification instead", key="switch_to_otp"):
                     st.session_state["_auth_state"] = "email"
@@ -424,10 +431,13 @@ header { display: none !important; }
                         st.error("Password must be 128 characters or fewer.")
                     elif new_password != confirm_password:
                         st.error("The passwords do not match.")
-                    elif _complete_password_setup(setup_email, setup_username, new_password):
-                        st.rerun()
                     else:
-                        st.error("Could not save your password. Please try again.")
+                        try:
+                            if _complete_password_setup(setup_email, setup_username, new_password):
+                                st.rerun()
+                            st.error("Could not save your password. Please try again.")
+                        except RuntimeError:
+                            st.error("The account database is unavailable or not configured. Check the app's Supabase settings.")
 
             elif auth_state == "email":
                 st.markdown('<div class="login-heading">Welcome back</div>', unsafe_allow_html=True)
@@ -509,8 +519,12 @@ header { display: none !important; }
                             st.rerun()
                         elif otp_input.strip() == st.session_state.get("_auth_otp", ""):
                             username = st.session_state.get("_auth_pending_username", "")
-                            _complete_otp_authentication(email_display, username)
-                            st.rerun()
+                            try:
+                                _complete_otp_authentication(email_display, username)
+                            except RuntimeError:
+                                st.error("The account database is unavailable or not configured. Check the app's Supabase settings.")
+                            else:
+                                st.rerun()
                         else:
                             remaining_attempts = _record_failed_otp_attempt()
                             st.error(f"Incorrect OTP. {remaining_attempts} attempts remaining.")
