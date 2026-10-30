@@ -28,6 +28,19 @@ _OTP_TTL_SECONDS = 300  # OTP expires after 5 minutes
 _OTP_MAX_ATTEMPTS = 5
 
 
+@st.fragment(run_every="1s")
+def _render_otp_countdown() -> None:
+    """Refresh the visible expiry clock without rerunning the entire login page."""
+    started_at = st.session_state.get("_auth_otp_ts", time.time())
+    remaining = max(0, int(_OTP_TTL_SECONDS - (time.time() - started_at)))
+    if remaining:
+        mins, secs = divmod(remaining, 60)
+        label = f"Expires in {mins:01d}:{secs:02d}"
+    else:
+        label = "Code expired · resend a new one"
+    st.markdown(f'<div class="otp-timer">{html.escape(label)}</div>', unsafe_allow_html=True)
+
+
 class EmailConfigurationError(Exception):
     """Raised when required SMTP settings are not present or usable."""
 
@@ -494,11 +507,10 @@ header { display: none !important; }
                 else:
                     st.markdown('<div class="login-heading">Verification code</div>', unsafe_allow_html=True)
                     if st.session_state.pop("_auth_email_sent_notice", False):
-                        st.success("Verification code sent to your email.")
+                        st.success("Brevo accepted the email request. Check your Inbox and Spam folders.")
                     st.caption(f"Sent to {email_display}")
 
-                    mins, secs = divmod(remaining, 60)
-                    st.markdown(f'<div class="otp-timer">Expires in {mins:01d}:{secs:02d}</div>', unsafe_allow_html=True)
+                    _render_otp_countdown()
 
                     with st.form("login_otp_form", clear_on_submit=True):
                         otp_input = st.text_input(
